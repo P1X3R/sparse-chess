@@ -1,8 +1,3 @@
-pub trait Coder {
-    fn forward(&self, input: Vec<usize>) -> Vec<usize>;
-    fn learn(&mut self);
-}
-
 #[derive(Debug, Copy, Clone)]
 pub struct CsdrSize {
     pub x: usize,
@@ -24,13 +19,13 @@ impl CsdrSize {
     }
 }
 
-pub fn column_wise_one_hot(csdr: Vec<i8>, z: usize) -> Vec<usize> {
+pub fn column_wise_one_hot(csdr: &[f32], z: usize) -> Vec<usize> {
     return csdr
         .chunks_exact(z)
         .map(|col| {
             col.iter()
                 .enumerate()
-                .max_by_key(|&(_, cell)| cell)
+                .max_by(|&(_, a), &(_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                 .map(|(idx, _)| idx)
                 .unwrap()
         })
