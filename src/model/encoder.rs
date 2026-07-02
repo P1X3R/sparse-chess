@@ -1,55 +1,51 @@
 use crate::model::coder::{CsdrSize, column_wise_one_hot};
-use fast_math::exp_raw;
 use rand::{
     distr::{Distribution, Uniform},
     rngs::SmallRng,
 };
 
-fn gen_field_bounds(
-    radius: usize,
-    ratio: (f32, f32),
-    hidden_size: &CsdrSize,
-    visible_size: &CsdrSize,
-) -> (
-    Vec<(isize, isize)>,
-    Vec<(isize, isize)>,
-    Vec<(isize, isize)>,
-) {
-    let mut field_start_lut: Vec<(isize, isize)> = Vec::with_capacity(hidden_size.cols);
-    let mut clamped_start_lut: Vec<(isize, isize)> = Vec::with_capacity(hidden_size.cols);
-    let mut clamped_end_lut: Vec<(isize, isize)> = Vec::with_capacity(hidden_size.cols);
+#[derive(Debug)]
+struct FieldBounds {
+    field_start: (i16, i16),
+    clamped_start: (i16, i16),
+    clamped_end: (i16, i16),
+}
 
-    for hidden_col in 0..hidden_size.cols {
-        let hidden_col_x = hidden_col % hidden_size.x;
-        let hidden_col_y = hidden_col / hidden_size.x;
-
+impl FieldBounds {
+    fn new(
+        hidden_x: usize,
+        hidden_y: usize,
+        radius: usize,
+        ratio: (f32, f32),
+        visible_size: &CsdrSize,
+    ) -> Self {
         let visible_center = (
-            ((hidden_col_x as f32 + 0.5f32) * ratio.0) as isize,
-            ((hidden_col_y as f32 + 0.5f32) * ratio.1) as isize,
+            ((hidden_x as f32 + 0.5f32) * ratio.0) as i16,
+            ((hidden_y as f32 + 0.5f32) * ratio.1) as i16,
         );
 
         let field_start = (
-            visible_center.0 - radius as isize,
-            visible_center.1 - radius as isize,
+            visible_center.0 - radius as i16,
+            visible_center.1 - radius as i16,
         );
 
         let field_end = (
-            visible_center.0 as isize + radius as isize,
-            visible_center.1 as isize + radius as isize,
+            visible_center.0 as i16 + radius as i16,
+            visible_center.1 as i16 + radius as i16,
         );
 
         let clamped_start = (field_start.0.max(0), field_start.1.max(0));
         let clamped_end = (
-            field_end.0.min(visible_size.x as isize - 1),
-            field_end.1.min(visible_size.y as isize - 1),
+            field_end.0.min(visible_size.x as i16 - 1),
+            field_end.1.min(visible_size.y as i16 - 1),
         );
 
-        field_start_lut.push(field_start);
-        clamped_start_lut.push(clamped_start);
-        clamped_end_lut.push(clamped_end);
+        Self {
+            field_start,
+            clamped_start,
+            clamped_end,
+        }
     }
-
-    return (field_start_lut, clamped_start_lut, clamped_end_lut);
 }
 
 #[derive(Debug)]
@@ -59,10 +55,9 @@ pub struct Encoder {
 
     area: usize,
     diameter: usize,
+    field_bounds: Vec<FieldBounds>,
 
-    field_start_lut: Vec<(isize, isize)>,
-    clamped_start_lut: Vec<(isize, isize)>,
-    clamped_end_lut: Vec<(isize, isize)>,
+    activations: Vec<f32>,
 
     lr: f32,
     dictionary: Vec<f32>,
@@ -83,8 +78,6 @@ impl Encoder {
             visible_size.x as f32 / hidden_size.x as f32,
             visible_size.y as f32 / hidden_size.y as f32,
         );
-        let (field_start_lut, clamped_start_lut, clamped_end_lut) =
-            gen_field_bounds(radius, ratio, &hidden_size, &visible_size);
 
         Self {
             visible_size,
@@ -92,111 +85,80 @@ impl Encoder {
 
             area,
             diameter,
+            field_bounds: (0..hidden_size.cols)
+                .map(|col| {
+                    FieldBounds::new(
+                        col % hidden_size.x,
+                        col / hidden_size.y,
+                        radius,
+                        ratio,
+                        &visible_size,
+                    )
+                })
+                .collect(),
 
-            field_start_lut,
-            clamped_start_lut,
-            clamped_end_lut,
+            activations: vec![0.0; hidden_size.flat],
 
             lr,
-            dictionary: (0..visible_size.z * area * hidden_size.flat)
+            dictionary: (0..area * visible_size.z * hidden_size.z)
                 .map(|_| range.sample(rng))
                 .collect(),
         }
     }
 
-    pub fn forward(&self, input: &[usize]) -> Vec<usize> {
+    pub fn forward(&mut self, input: &[usize]) -> Vec<usize> {
         assert_eq!(input.len(), self.visible_size.cols);
 
-        // NOTE: accumulator/activations columns are center-biased. Inside each, cells are normalized, meaning `column_wise_one_hot` works.
-        let mut activations: Vec<f32> = vec![0.0; self.hidden_size.flat];
+        self.activations.fill(0.0);
 
+        // NOTE: accumulator/activations columns are center-biased. Inside each, cells are normalized, meaning `column_wise_one_hot` works.
         for hidden_col in 0..self.hidden_size.cols {
-            let field_start = self.field_start_lut[hidden_col];
-            let clamped_start = self.clamped_start_lut[hidden_col];
-            let clamped_end = self.clamped_end_lut[hidden_col];
+            let FieldBounds {
+                field_start: (field_start_x, field_start_y),
+                clamped_start: (clamped_start_x, clamped_start_y),
+                clamped_end: (clamped_end_x, clamped_end_y),
+            } = self.field_bounds[hidden_col];
+
+            let (field_start_x, field_start_y) = (field_start_x as isize, field_start_y as isize);
+            let (clamped_start_x, clamped_start_y) =
+                (clamped_start_x as isize, clamped_start_y as isize);
+            let (clamped_end_x, clamped_end_y) = (clamped_end_x as isize, clamped_end_y as isize);
 
             let activation_col_start = hidden_col * self.hidden_size.z;
-            let activation_col =
-                &mut activations[activation_col_start..(activation_col_start + self.hidden_size.z)];
+            let activation_col = &mut self.activations
+                [activation_col_start..(activation_col_start + self.hidden_size.z)];
 
-            for visible_x in clamped_start.0..=clamped_end.0 {
-                for visible_y in clamped_start.1..=clamped_end.1 {
-                    let in_field_x = visible_x - field_start.0 as isize;
-                    let in_field_y = visible_y - field_start.1 as isize;
+            for visible_y in clamped_start_y..=clamped_end_y {
+                let visible_y_offset = (self.visible_size.x as isize * visible_y) as usize;
+                let in_field_y = visible_y - field_start_y;
+                let in_field_y_offset = (self.diameter as isize * in_field_y) as usize;
 
-                    let in_field_idx =
-                        (in_field_x + (self.diameter as isize * in_field_y)) as usize;
-                    let input_cell =
-                        input[(visible_x + (self.visible_size.x as isize * visible_y)) as usize];
+                for visible_x in clamped_start_x..=clamped_end_x {
+                    let in_field_x = visible_x - field_start_x;
+                    let in_field_idx = (in_field_x as usize) + in_field_y_offset;
 
-                    let dictionary_start = (hidden_col * self.hidden_size.z)
-                        + (in_field_idx * self.visible_size.z)
-                        + (input_cell * self.visible_size.z * self.area);
+                    let input_cell = input[(visible_x as usize) + visible_y_offset];
+
+                    let dictionary_start =
+                        self.hidden_size.z * (input_cell + (in_field_idx * self.visible_size.z));
 
                     let dictionary_col =
                         &self.dictionary[dictionary_start..(dictionary_start + self.hidden_size.z)];
 
-                    for hidden_cell in 0..self.hidden_size.z {
-                        activation_col[hidden_cell] += dictionary_col[hidden_cell];
+                    for (activation, weight) in activation_col.iter_mut().zip(dictionary_col) {
+                        *activation += weight;
                     }
                 }
             }
         }
 
-        let hidden = column_wise_one_hot(&activations, self.hidden_size.z);
+        let hidden = column_wise_one_hot(&self.activations, self.hidden_size.z);
         assert_eq!(hidden.len(), self.hidden_size.cols);
 
         hidden
     }
 
     pub fn learn(&mut self, expected: &[usize], hidden: &[usize]) {
-        let reconstruction = self.reconstruct(hidden);
-    }
-
-    fn reconstruct(&self, hidden: &[usize]) -> Vec<f32> {
-        // NOTE: accumulator/reconstruction columns are center-biased. Inside each, cells are normalized, meaning `column_wise_one_hot` works.
-        let mut reconstruction_acc: Vec<f32> = vec![0.0; self.visible_size.flat];
-
-        for hidden_col in 0..self.hidden_size.cols {
-            let field_start = self.field_start_lut[hidden_col];
-            let clamped_start = self.clamped_start_lut[hidden_col];
-            let clamped_end = self.clamped_end_lut[hidden_col];
-
-            let hidden_idx = hidden[hidden_col] + (hidden_col * self.hidden_size.z);
-
-            for visible_x in clamped_start.0..=clamped_end.0 {
-                for visible_y in clamped_start.1..=clamped_end.1 {
-                    let in_field_x = visible_x - field_start.0 as isize;
-                    let in_field_y = visible_y - field_start.1 as isize;
-
-                    let in_field_idx =
-                        (in_field_x + (self.diameter as isize * in_field_y)) as usize;
-
-                    let reconstruction_start = (visible_y * self.visible_size.z as isize) as usize
-                        + (visible_x * self.visible_size.z as isize * self.visible_size.y as isize)
-                            as usize;
-
-                    let reconstruction_col = &mut reconstruction_acc
-                        [reconstruction_start..(reconstruction_start + self.visible_size.z)];
-                    let idxs: Vec<usize> = (0..self.visible_size.z)
-                        .map(|z| {
-                            hidden_idx
-                                + (in_field_idx * self.visible_size.z)
-                                + (z * self.visible_size.z * self.area)
-                        })
-                        .collect();
-
-                    for visible_z in 0..self.visible_size.z {
-                        reconstruction_col[visible_z] += self.dictionary[idxs[visible_z]];
-                    }
-                }
-            }
-        }
-
-        for cell in reconstruction_acc.iter_mut() {
-            *cell = exp_raw(cell.min(0.0));
-        }
-
-        return reconstruction_acc;
+        todo!()
     }
 }
