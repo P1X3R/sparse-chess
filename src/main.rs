@@ -13,11 +13,11 @@ fn main() {
     let start = Instant::now();
     let mut rng: SmallRng = rand::make_rng();
     let input_size = CsdrSize::new(8, 8, 13);
-    let range = Uniform::new(0, input_size.z).unwrap();
-    let mut encoder = Encoder::new(input_size, CsdrSize::new(32, 32, 32), 1, 0.01, &mut rng);
-    let samples = 10_000;
+    let range = Uniform::new(0, input_size.z as u16).unwrap();
+    let mut encoder = Encoder::new(input_size, CsdrSize::new(32, 32, 32), 1, 1, 0.01, &mut rng);
+    let samples = 1_000;
 
-    let mut input_buffer = vec![0; input_size.cols];
+    let mut input_buffer = vec![0u16; input_size.cols];
     for cell in input_buffer.iter_mut() {
         *cell = range.sample(&mut rng);
     }
@@ -26,6 +26,7 @@ fn main() {
     let start = Instant::now();
     for _ in 0..samples {
         encoder.forward(&input_buffer);
+        encoder.learn(&input_buffer);
     }
     let elapsed = Instant::now() - start;
 
