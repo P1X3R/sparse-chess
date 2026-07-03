@@ -271,7 +271,7 @@ impl Encoder {
             }
 
             let byte_inv = 1.0 / 255.0;
-            let clamped_area = start - end + 1;
+            let clamped_area = end - start + 1;
             let count_all = clamped_area as f32 * self.visible_size.z as f32;
             let count_except = clamped_area as f32 * (self.visible_size.z - 1) as f32;
             let beta = self.choice + count_all;
