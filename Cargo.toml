@@ -4,12 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-fast-math = "0.1.1"
 rand = "0.10.1"
 
 [profile.release]
 opt-level = 3
-debug = false
-lto = "fat"
+# lto = "fat"
+# debug = true          # Keeps function names and line numbers
+# debug-assertions = false
 codegen-units = 1
 panic = "abort"

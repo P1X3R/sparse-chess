@@ -56,7 +56,9 @@ pub struct Encoder {
     area: usize,
     diameter: usize,
     field_bounds: Box<[FieldBounds]>,
-    learning_radius: isize,
+
+    learning_field_lut: Box<[u32]>,
+    learning_field_offsets: Box<[(u32, u32)]>,
 
     hidden_sum: Box<[u16]>,
     hidden_totals: Box<[u16]>,
@@ -90,6 +92,8 @@ impl Encoder {
             visible_size.x as f32 / hidden_size.x as f32,
             visible_size.y as f32 / hidden_size.y as f32,
         );
+        let (learning_field_lut, learning_field_offsets) =
+            Encoder::init_learning_field_lut(&hidden_size, learning_radius);
 
         Self {
             visible_size,
@@ -108,7 +112,9 @@ impl Encoder {
                     )
                 })
                 .collect(),
-            learning_radius,
+
+            learning_field_lut,
+            learning_field_offsets,
 
             hidden_sum: vec![0; hidden_size.flat].into_boxed_slice(),
             hidden_totals: vec![0; hidden_size.flat].into_boxed_slice(),
@@ -127,6 +133,55 @@ impl Encoder {
                 .map(|_| rng.random())
                 .collect(),
         }
+    }
+
+    fn init_learning_field_lut(
+        hidden_size: &CsdrSize,
+        learning_radius: isize,
+    ) -> (Box<[u32]>, Box<[(u32, u32)]>) {
+        let diameter = (2 * learning_radius + 1) as usize;
+        let area = diameter * diameter;
+        let mut learning_field_lut = Vec::with_capacity(hidden_size.cols * area);
+        let mut learning_field_offsets = Vec::with_capacity(hidden_size.cols);
+
+        for hidden_col in 0..hidden_size.cols {
+            let hidden_x = hidden_col % hidden_size.x;
+            let hidden_y = hidden_col / hidden_size.x;
+
+            let start_idx = learning_field_lut.len() as u32;
+
+            for delta_y in -learning_radius..=learning_radius {
+                let neighbor_y = hidden_y as isize + delta_y;
+                if neighbor_y < 0 || neighbor_y >= hidden_size.y as isize {
+                    continue;
+                }
+
+                for delta_x in -learning_radius..=learning_radius {
+                    let neighbor_x = hidden_x as isize + delta_x;
+                    if neighbor_x < 0
+                        || neighbor_x >= hidden_size.x as isize
+                        || (delta_x == 0 && delta_y == 0)
+                    {
+                        continue;
+                    }
+
+                    let neighbor_idx = flat_index!(
+                        [hidden_size.y, hidden_size.x],
+                        [neighbor_y as usize, neighbor_x as usize]
+                    );
+
+                    learning_field_lut.push(neighbor_idx as u32);
+                }
+            }
+
+            let end_idx = learning_field_lut.len() as u32;
+            learning_field_offsets.push((start_idx, end_idx));
+        }
+
+        (
+            learning_field_lut.into_boxed_slice(),
+            learning_field_offsets.into_boxed_slice(),
+        )
     }
 
     pub fn forward(&mut self, input: &[u16]) -> &[u16] {
@@ -237,40 +292,20 @@ impl Encoder {
             return false;
         }
 
-        let hidden_x = hidden_col % self.hidden_size.x;
-        let hidden_y = hidden_col / self.hidden_size.x;
+        let (start, end) = self.learning_field_offsets[hidden_col];
+        let (start, end) = (start as usize, end as usize);
+        let learning_field = &self.learning_field_lut[start..end];
 
-        let mut higher_neighbors = 0;
-        let mut neighbors_cnt = 1;
-        for delta_y in -self.learning_radius..=self.learning_radius {
-            let neighbor_y = hidden_y as isize + delta_y;
-            if neighbor_y < 0 || neighbor_y >= self.hidden_size.y as isize {
-                continue;
-            }
+        let higher_neighbors = learning_field
+            .iter()
+            .filter(|&&neighbor_idx| {
+                self.hidden_max_activation[neighbor_idx as usize]
+                    > self.hidden_max_activation[hidden_col]
+            })
+            .count();
+        let field_cnt = end - start + 1;
 
-            for delta_x in -self.learning_radius..=self.learning_radius {
-                let neighbor_x = hidden_x as isize + delta_x;
-                if neighbor_x < 0
-                    || neighbor_x >= self.hidden_size.x as isize
-                    || (delta_x == 0 && delta_y == 0)
-                {
-                    continue;
-                }
-
-                let neighbor_idx = flat_index!(
-                    [self.hidden_size.y, self.hidden_size.x],
-                    [neighbor_y as usize, neighbor_x as usize]
-                );
-
-                neighbors_cnt += 1;
-                if self.hidden_max_activation[neighbor_idx] > self.hidden_max_activation[hidden_col]
-                {
-                    higher_neighbors += 1;
-                }
-            }
-        }
-
-        higher_neighbors as f32 <= self.active_ratio * neighbors_cnt as f32
+        higher_neighbors as f32 <= self.active_ratio * field_cnt as f32
     }
 
     pub fn learn(&mut self, input: &[u16]) {
