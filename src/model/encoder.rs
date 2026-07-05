@@ -1,6 +1,8 @@
 use crate::{flat_index, model::coder::CsdrSize};
 use rand::{Rng, rngs::SmallRng};
 
+const BYTE_INV: f32 = 1.0 / 255.0;
+
 #[derive(Debug)]
 struct FieldBounds {
     field_start_x: i16,
@@ -55,15 +57,20 @@ impl FieldBounds {
 }
 
 #[derive(Debug)]
+#[repr(align(64))]
 pub struct Encoder {
     visible_size: CsdrSize,
     hidden_size: CsdrSize,
+
+    area: usize,
 
     local_field_lut: Box<[LocalField]>,
     local_field_offsets: Box<[(u32, u32)]>,
 
     learning_field_lut: Box<[u32]>,
     learning_field_offsets: Box<[(u32, u32)]>,
+
+    weight_deltas: [u8; 256],
 
     hidden_sum: Box<[u16]>,
     hidden_totals: Box<[u16]>,
@@ -76,8 +83,6 @@ pub struct Encoder {
     choice: f32,
     vigilance: f32,
     active_ratio: f32,
-
-    lr: f32,
 
     dictionary: Box<[u8]>,
 }
@@ -108,11 +113,17 @@ impl Encoder {
             visible_size,
             hidden_size,
 
+            area,
+
             local_field_lut,
             local_field_offsets,
 
             learning_field_lut,
             learning_field_offsets,
+
+            weight_deltas: std::array::from_fn(|w| {
+                (w as u8).saturating_add((lr * (255.0 - w as f32)).ceil() as u8)
+            }),
 
             hidden_sum: vec![0; hidden_size.flat].into_boxed_slice(),
             hidden_totals: vec![0; hidden_size.flat].into_boxed_slice(),
@@ -126,7 +137,6 @@ impl Encoder {
             vigilance: 0.9,
             active_ratio: 0.5,
 
-            lr,
             dictionary,
         }
     }
@@ -187,13 +197,14 @@ impl Encoder {
     ) -> (Box<[LocalField]>, Box<[(u32, u32)]>) {
         let diameter = (2 * radius + 1) as usize;
         let area = diameter * diameter;
-        let mut local_field_lut = Vec::with_capacity(hidden_size.cols * area);
-        let mut local_field_offsets = Vec::with_capacity(hidden_size.cols);
-
         let ratio = (
             visible_size.x as f32 / hidden_size.x as f32,
             visible_size.y as f32 / hidden_size.y as f32,
         );
+
+        let mut local_field_lut = Vec::with_capacity(hidden_size.cols * area);
+        let mut local_field_offsets = Vec::with_capacity(hidden_size.cols);
+
         for hidden_col in 0..hidden_size.cols {
             let bounds = FieldBounds::new(
                 hidden_col % hidden_size.x,
@@ -222,7 +233,7 @@ impl Encoder {
                         ) as u32,
                         dictionary_base: flat_index!(
                             [hidden_size.cols, area, visible_size.z, hidden_size.z],
-                            [hidden_col, in_field_idx, 0, 0]
+                            [hidden_col, 0, in_field_idx, 0]
                         ) as u32,
                     });
                 }
@@ -247,11 +258,11 @@ impl Encoder {
         for hidden_col in 0..self.hidden_size.cols {
             let sum_col_start =
                 flat_index!([self.hidden_size.cols, self.hidden_size.z], [hidden_col, 0]);
-            let sum_col = &mut self.hidden_sum[sum_col_start..(sum_col_start + self.hidden_size.z)];
-            let total_col =
-                &self.hidden_totals[sum_col_start..(sum_col_start + self.hidden_size.z)];
-            let commited_col =
-                &self.is_commited[sum_col_start..(sum_col_start + self.hidden_size.z)];
+            let sum_col_end = sum_col_start + self.hidden_size.z;
+            let sum_col_range = sum_col_start..sum_col_end;
+            let sum_col = &mut self.hidden_sum[sum_col_range.clone()];
+            let total_col = &self.hidden_totals[sum_col_range.clone()];
+            let commited_col = &self.is_commited[sum_col_range];
 
             let (start, end) = self.local_field_offsets[hidden_col];
             let (start, end) = (start as usize, end as usize);
@@ -260,18 +271,25 @@ impl Encoder {
                 let input_cell = input[field.input_cell_idx as usize] as usize;
 
                 let dictionary_start = field.dictionary_base as usize
-                    + flat_index!([self.visible_size.z, self.hidden_size.z], [input_cell, 0]);
+                    + flat_index!(
+                        [
+                            hidden_size.cols,
+                            self.area,
+                            self.visible_size.z,
+                            self.hidden_size.z
+                        ],
+                        [0, 0, input_cell, 0]
+                    ) as usize;
+                let dictionary_end = dictionary_start + self.hidden_size.z;
 
-                let dictionary_col =
-                    &self.dictionary[dictionary_start..(dictionary_start + self.hidden_size.z)];
+                let dictionary_col = &self.dictionary[dictionary_start..dictionary_end];
 
-                for (sum, &weight) in sum_col.iter_mut().zip(dictionary_col) {
-                    *sum += weight as u16;
+                for cell in 0..self.hidden_size.z {
+                    sum_col[cell] += dictionary_col[cell] as u16;
                 }
             }
 
-            let byte_inv = 1.0 / 255.0;
-            let clamped_area = end - start + 1;
+            let clamped_area = end - start;
             let count_all = clamped_area as f32 * self.visible_size.z as f32;
             let count_except = clamped_area as f32 * (self.visible_size.z - 1) as f32;
             let beta = self.choice + count_all;
@@ -282,16 +300,16 @@ impl Encoder {
             let mut max_activation_cell = None;
             let mut max_complete_activation_cell = 0;
 
-            for (cell, ((&sum_raw, &total_raw), is_commited)) in
-                sum_col.iter().zip(total_col).zip(commited_col).enumerate()
-            {
-                let sum = sum_raw as f32 * byte_inv;
-                let total = total_raw as f32 * byte_inv;
+            for cell in 0..self.hidden_size.z {
+                let sum = sum_col[cell] as f32 * BYTE_INV;
+                let total = total_col[cell] as f32 * BYTE_INV;
                 let complemented = sum - total + count_except;
                 let match_score = complemented / count_except;
                 let activation = complemented / (beta - total);
 
-                if (!is_commited || match_score >= self.vigilance) && activation > max_activation {
+                if (!commited_col[cell] || match_score >= self.vigilance)
+                    && activation > max_activation
+                {
                     max_activation = activation;
                     max_activation_cell = Some(cell);
                 }
@@ -319,6 +337,7 @@ impl Encoder {
         &self.hidden
     }
 
+    #[inline]
     fn can_col_learn(&self, hidden_col: usize) -> bool {
         if !self.hidden_learn_flag[hidden_col] {
             return false;
@@ -328,14 +347,15 @@ impl Encoder {
         let (start, end) = (start as usize, end as usize);
         let learning_field = &self.learning_field_lut[start..end];
 
-        let higher_neighbors = learning_field
-            .iter()
-            .filter(|&&neighbor_idx| {
-                self.hidden_max_activation[neighbor_idx as usize]
-                    > self.hidden_max_activation[hidden_col]
-            })
-            .count();
+        let center_activation = self.hidden_max_activation[hidden_col];
+
         let field_cnt = end - start + 1;
+        let mut higher_neighbors = 0;
+
+        for &neighbor_idx in learning_field {
+            higher_neighbors +=
+                (self.hidden_max_activation[neighbor_idx as usize] > center_activation) as usize;
+        }
 
         higher_neighbors as f32 <= self.active_ratio * field_cnt as f32
     }
@@ -351,27 +371,31 @@ impl Encoder {
                 [self.hidden_size.cols, self.hidden_size.z],
                 [hidden_col, hidden_z]
             );
-            let learning_rate = if self.is_commited[hidden_idx] {
-                self.lr
-            } else {
-                1.0
-            };
+
+            let is_commited = self.is_commited[hidden_idx];
 
             let (start, end) = self.local_field_offsets[hidden_col];
             let (start, end) = (start as usize, end as usize);
 
             for field in &self.local_field_lut[start..end] {
                 let input_cell = input[field.input_cell_idx as usize] as usize;
-
                 let dictionary_idx = field.dictionary_base as usize
                     + flat_index!(
-                        [self.visible_size.z, self.hidden_size.z],
-                        [input_cell, self.hidden[hidden_col] as usize]
-                    );
+                        [
+                            hidden_size.cols,
+                            self.area,
+                            self.visible_size.z,
+                            self.hidden_size.z
+                        ],
+                        [0, 0, input_cell, hidden_z]
+                    ) as usize;
 
                 let old = self.dictionary[dictionary_idx];
-                self.dictionary[dictionary_idx] =
-                    old.saturating_add((learning_rate * (255.0 - old as f32)).ceil() as u8);
+                self.dictionary[dictionary_idx] = if is_commited {
+                    self.weight_deltas[old as usize]
+                } else {
+                    255
+                };
                 self.hidden_totals[hidden_idx] += (self.dictionary[dictionary_idx] - old) as u16;
             }
 
