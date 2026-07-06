@@ -1,5 +1,4 @@
 use crate::{flat_index, model::coder::CsdrSize};
-use rand::{Rng, rngs::SmallRng};
 
 const BYTE_INV: f32 = 1.0 / 255.0;
 
@@ -94,7 +93,6 @@ impl Encoder {
         radius: i16,
         learning_radius: isize,
         lr: f32,
-        rng: &mut SmallRng,
     ) -> Self {
         let diameter = radius * 2 + 1;
         let area = (diameter * diameter) as usize;
@@ -103,11 +101,7 @@ impl Encoder {
         let (local_field_lut, local_field_offsets) =
             Encoder::init_local_field_lut(&hidden_size, &visible_size, radius);
 
-        let mut dictionary: Box<[u8]> = unsafe {
-            Box::new_uninit_slice(hidden_size.cols * area * visible_size.z * hidden_size.z)
-                .assume_init()
-        };
-        rng.fill_bytes(&mut dictionary);
+        let mut rng = fastrand::Rng::new();
 
         Self {
             visible_size,
@@ -137,7 +131,9 @@ impl Encoder {
             vigilance: 0.9,
             active_ratio: 0.5,
 
-            dictionary,
+            dictionary: std::iter::repeat_with(|| rng.u8(0..=8))
+                .take(visible_size.z * hidden_size.cols * area * hidden_size.z)
+                .collect(),
         }
     }
 
@@ -232,8 +228,8 @@ impl Encoder {
                             [visible_y as usize, visible_x as usize]
                         ) as u32,
                         dictionary_base: flat_index!(
-                            [hidden_size.cols, area, visible_size.z, hidden_size.z],
-                            [hidden_col, 0, in_field_idx, 0]
+                            [visible_size.z, hidden_size.cols, area, hidden_size.z],
+                            [0, hidden_col, in_field_idx, 0]
                         ) as u32,
                     });
                 }
@@ -273,12 +269,12 @@ impl Encoder {
                 let dictionary_start = field.dictionary_base as usize
                     + flat_index!(
                         [
-                            hidden_size.cols,
-                            self.area,
                             self.visible_size.z,
+                            self.hidden_size.cols,
+                            self.area,
                             self.hidden_size.z
                         ],
-                        [0, 0, input_cell, 0]
+                        [input_cell, 0, 0, 0]
                     ) as usize;
                 let dictionary_end = dictionary_start + self.hidden_size.z;
 
@@ -382,12 +378,12 @@ impl Encoder {
                 let dictionary_idx = field.dictionary_base as usize
                     + flat_index!(
                         [
-                            hidden_size.cols,
-                            self.area,
                             self.visible_size.z,
+                            self.hidden_size.cols,
+                            self.area,
                             self.hidden_size.z
                         ],
-                        [0, 0, input_cell, hidden_z]
+                        [input_cell, 0, 0, hidden_z]
                     ) as usize;
 
                 let old = self.dictionary[dictionary_idx];
