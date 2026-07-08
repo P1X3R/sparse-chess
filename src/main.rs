@@ -4,31 +4,57 @@ use std::time::Instant;
 
 use model::coder::CsdrSize;
 use model::encoder::Encoder;
-use rand::{
-    distr::{Distribution, Uniform},
-    rngs::SmallRng,
-};
+
+use crate::model::decoder::Decoder;
 
 fn main() {
     let start = Instant::now();
-    let mut rng: SmallRng = rand::make_rng();
     let input_size = CsdrSize::new(8, 8, 13);
-    let range = Uniform::new(0, input_size.z as u16).unwrap();
-    let mut encoder = Encoder::new(input_size, CsdrSize::new(32, 32, 32), 1, 1, 0.01, &mut rng);
+    let hidden_size = CsdrSize::new(32, 32, 32);
+    let mut encoder = Encoder::new(input_size, hidden_size, 1, 1, 0.01);
+    let decoder = Decoder::new(hidden_size, input_size, 2, 1);
     let samples = 1_000;
 
     let mut input_buffer = vec![0u16; input_size.cols];
+    let input_start = Instant::now();
     for cell in input_buffer.iter_mut() {
-        *cell = range.sample(&mut rng);
+        *cell = fastrand::u16(0u16..(input_size.z as u16));
     }
+    let input_time = Instant::now() - input_start;
     let init_time = Instant::now() - start;
 
     let start = Instant::now();
-    for _ in 0..samples {
-        encoder.forward(&input_buffer);
-        encoder.learn(&input_buffer);
+
+    // 1. Create 3 distinct "prototype" patterns
+    let mut prototype_a = vec![0u16; input_size.cols];
+    let mut prototype_b = vec![0u16; input_size.cols];
+    let mut prototype_c = vec![0u16; input_size.cols];
+
+    for i in 0..input_size.cols {
+        prototype_a[i] = (i % input_size.z) as u16;
+        prototype_b[i] = ((i * 2) % input_size.z) as u16;
+        prototype_c[i] = (input_size.z - 1 - (i % input_size.z)) as u16;
     }
-    let elapsed = Instant::now() - start;
+
+    for _ in 0..samples {
+        let mut current_input = match fastrand::u8(0..3) {
+            0 => prototype_a.clone(),
+            1 => prototype_b.clone(),
+            _ => prototype_c.clone(),
+        };
+
+        for cell in current_input.iter_mut() {
+            if fastrand::f32() < 0.05 {
+                *cell = fastrand::u16(0u16..(input_size.z as u16));
+            }
+        }
+
+        let hidden = encoder.forward(&current_input);
+        let learning_data = decoder.forward(&hidden);
+        encoder.learn(&current_input, &hidden);
+        std::hint::black_box(learning_data);
+    }
+    let elapsed = Instant::now() - start - (input_time * samples);
 
     println!("Initialization time: {:.2?}", init_time);
     println!("Samples: {}", samples);
