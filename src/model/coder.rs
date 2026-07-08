@@ -84,3 +84,12 @@ macro_rules! flat_index {
         compile_error!("Mismatched number of dimensions and indices in flat_index!")
     };
 }
+
+#[inline(always)]
+pub fn rand_round(x: f32, rng: &mut fastrand::Rng) -> f32 {
+    if rng.f32_inclusive() < x.fract() {
+        x.floor()
+    } else {
+        x.ceil()
+    }
+}

@@ -1,7 +1,11 @@
 use crate::{
     flat_index,
-    model::coder::{CsdrSize, FieldBounds},
+    model::coder::{CsdrSize, FieldBounds, rand_round},
 };
+
+fn heavystep(x: i16) -> f32 {
+    if x <= 0 { 0.0 } else { 1.0 }
+}
 
 #[derive(Debug)]
 struct LocalField {
@@ -22,7 +26,12 @@ pub struct Decoder {
     half_dendrites: usize,
     dendrites: usize,
 
+    lr: f32,
+
+    weight_deltas: Box<[i8]>,
     weights: Box<[i8]>,
+
+    rng: fastrand::Rng,
 }
 
 impl Decoder {
@@ -31,6 +40,7 @@ impl Decoder {
         hidden_size: CsdrSize,
         half_dendrites: usize,
         radius: i16,
+        lr: f32,
     ) -> Self {
         let mut rng = fastrand::Rng::new();
         let dendrites = half_dendrites * 2;
@@ -52,9 +62,14 @@ impl Decoder {
             half_dendrites: half_dendrites,
             dendrites: half_dendrites * 2,
 
+            lr,
+
+            weight_deltas: vec![0; dendrites].into_boxed_slice(),
             weights: std::iter::repeat_with(|| rng.i8(-12..=12))
                 .take(visible_size.z * hidden_size.cols * area * hidden_size.z * dendrites)
                 .collect(),
+
+            rng,
         }
     }
 
@@ -124,8 +139,8 @@ impl Decoder {
         )
     }
 
-    pub fn forward(&self, concat: &[u16]) -> (Box<[u16]>, Box<[i16]>, Box<[f32]>) {
-        assert_eq!(concat.len(), self.visible_size.cols);
+    pub fn forward(&self, concat: &[u16]) -> (Box<[u16]>, (Box<[i16]>, Box<[f32]>)) {
+        debug_assert_eq!(concat.len(), self.visible_size.cols);
 
         let mut hidden: Box<[u16]> = vec![0; self.hidden_size.cols].into_boxed_slice();
         let mut dendrite_activations: Box<[i16]> =
@@ -135,12 +150,12 @@ impl Decoder {
         for hidden_col in 0..self.hidden_size.cols {
             let (start, end) = self.local_field_offsets[hidden_col];
             let (start, end) = (start as usize, end as usize);
-            let hidden_dendritic_col_base = flat_index!(
-                [self.hidden_size.cols, self.hidden_size.z, self.dendrites],
-                [hidden_col, 0, 0]
-            );
             let hidden_activation_col_base =
                 flat_index!([self.hidden_size.cols, self.hidden_size.z], [hidden_col, 0]);
+            let hidden_dendritic_col_base = flat_index!(
+                [self.hidden_size.flat, self.dendrites],
+                [hidden_activation_col_base, 0]
+            );
 
             for field in &self.local_field_lut[start..end] {
                 let concat_cell = concat[field.concat_cell_idx as usize] as usize;
@@ -242,6 +257,71 @@ impl Decoder {
             hidden[hidden_col] = max_idx as u16;
         }
 
-        (hidden, dendrite_activations, activations)
+        (hidden, (dendrite_activations, activations))
+    }
+
+    pub fn learn(
+        &mut self,
+        expected: &[u16], // Must be at current time step
+        concat: &[u16],   // Must be at previous time step
+        (dendrite_activations, activations): &(Box<[i16]>, Box<[f32]>), // Must be at previous time step
+    ) {
+        debug_assert!(expected.len() <= self.visible_size.cols);
+        debug_assert_eq!(concat.len(), self.visible_size.cols);
+        debug_assert_eq!(expected.len(), self.hidden_size.cols);
+
+        for hidden_col in 0..self.hidden_size.cols {
+            for hidden_z in 0..self.hidden_size.z {
+                let hidden_idx = flat_index!(
+                    [self.hidden_size.cols, self.hidden_size.z],
+                    [hidden_col, hidden_z]
+                );
+                let dendritic_start =
+                    flat_index!([self.hidden_size.flat, self.dendrites], [hidden_idx, 0]);
+                let dendritic_end = dendritic_start + self.dendrites;
+                let dendritic_cell = &dendrite_activations[dendritic_start..dendritic_end];
+
+                let activation = activations[hidden_idx];
+                let input_cell_val = f32::from(hidden_z == expected[hidden_col] as usize);
+                let error = input_cell_val - activation;
+
+                for dendrite in 0..self.dendrites {
+                    let delta = if dendrite >= self.half_dendrites {
+                        self.lr * heavystep(dendritic_cell[dendrite]) * error
+                    } else {
+                        self.lr * -heavystep(dendritic_cell[dendrite]) * error
+                    };
+
+                    self.weight_deltas[dendrite] =
+                        rand_round(delta, &mut self.rng).max(-128.0).min(127.0) as i8;
+                }
+
+                let (start, end) = self.local_field_offsets[hidden_col];
+                let (start, end) = (start as usize, end as usize);
+
+                for field in &self.local_field_lut[start..end] {
+                    let concat_col = field.concat_cell_idx as usize;
+                    let concat_cell = concat[concat_col] as usize;
+
+                    let weights_start = field.weight_base as usize
+                        + flat_index!(
+                            [
+                                self.visible_size.z,
+                                self.hidden_size.cols,
+                                self.area,
+                                self.hidden_size.z,
+                                self.dendrites
+                            ],
+                            [concat_cell, 0, 0, hidden_z, 0]
+                        );
+                    let weights_end = weights_start + self.dendrites;
+                    let weights_cell = &mut self.weights[weights_start..weights_end];
+
+                    for dendrite in 0..self.dendrites {
+                        weights_cell[dendrite] += self.weight_deltas[dendrite];
+                    }
+                }
+            }
+        }
     }
 }

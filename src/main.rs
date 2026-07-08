@@ -12,7 +12,7 @@ fn main() {
     let input_size = CsdrSize::new(8, 8, 13);
     let hidden_size = CsdrSize::new(32, 32, 32);
     let mut encoder = Encoder::new(input_size, hidden_size, 1, 1, 0.01);
-    let decoder = Decoder::new(hidden_size, input_size, 2, 1);
+    let mut decoder = Decoder::new(hidden_size, input_size, 2, 1, 0.01);
     let samples = 1_000;
 
     let mut input_buffer = vec![0u16; input_size.cols];
@@ -50,8 +50,9 @@ fn main() {
         }
 
         let hidden = encoder.forward(&current_input);
-        let learning_data = decoder.forward(&hidden);
+        let (_, learning_data) = decoder.forward(&hidden);
         encoder.learn(&current_input, &hidden);
+        decoder.learn(&hidden, &hidden, &learning_data);
         std::hint::black_box(learning_data);
     }
     let elapsed = Instant::now() - start - (input_time * samples);
