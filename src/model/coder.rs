@@ -87,9 +87,12 @@ macro_rules! flat_index {
 
 #[inline(always)]
 pub fn rand_round(x: f32, rng: &mut fastrand::Rng) -> f32 {
-    if rng.f32_inclusive() < x.fract() {
-        x.floor()
+    let floor = x.floor();
+    let fract = x - floor;
+
+    if rng.f32_inclusive() < fract {
+        floor + 1.0 // Round up
     } else {
-        x.ceil()
+        floor // Round down
     }
 }
