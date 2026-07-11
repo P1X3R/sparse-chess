@@ -11,11 +11,17 @@ struct LocalField {
     dictionary_base: u32,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct EncoderLearningData {
+    max_activations: Box<[f32]>,
+    learn_flags: Box<[bool]>,
+}
+
 #[derive(Debug)]
 #[repr(align(64))]
 pub struct Encoder {
-    visible_size: CsdrSize,
-    hidden_size: CsdrSize,
+    pub(crate) visible_size: CsdrSize,
+    pub(crate) hidden_size: CsdrSize,
 
     area: usize,
 
@@ -30,9 +36,6 @@ pub struct Encoder {
     hidden_sum: Box<[u16]>,
     hidden_totals: Box<[u16]>,
     is_commited: Box<[bool]>,
-
-    hidden_max_activation: Box<[f32]>,
-    hidden_learn_flag: Box<[bool]>,
 
     choice: f32,
     vigilance: f32,
@@ -78,12 +81,9 @@ impl Encoder {
             hidden_totals: vec![0; hidden_size.flat].into_boxed_slice(),
             is_commited: vec![false; hidden_size.flat].into_boxed_slice(),
 
-            hidden_max_activation: vec![0.0; hidden_size.cols].into_boxed_slice(),
-            hidden_learn_flag: vec![false; hidden_size.cols].into_boxed_slice(),
-
             choice: 0.01,
             vigilance: 0.9,
-            active_ratio: 0.5,
+            active_ratio: 0.10,
 
             dictionary: std::iter::repeat_with(|| rng.u8(0..=8))
                 .take(visible_size.z * hidden_size.cols * area * hidden_size.z)
@@ -199,11 +199,13 @@ impl Encoder {
         )
     }
 
-    pub fn forward(&mut self, input: &[u16]) -> Box<[u16]> {
-        debug_assert_eq!(input.len(), self.visible_size.cols);
+    pub fn forward(&mut self, input: &[u16]) -> (Box<[u16]>, EncoderLearningData) {
+        assert_eq!(input.len(), self.visible_size.cols);
 
         self.hidden_sum.fill(0);
         let mut hidden = vec![0; self.hidden_size.cols].into_boxed_slice();
+        let mut cols_max_activation = vec![0.0; self.hidden_size.cols].into_boxed_slice();
+        let mut cols_learn_flag = vec![false; self.hidden_size.cols].into_boxed_slice();
 
         for hidden_col in 0..self.hidden_size.cols {
             let sum_col_start =
@@ -219,6 +221,7 @@ impl Encoder {
 
             for field in &self.local_field_lut[start..end] {
                 let input_cell = input[field.input_cell_idx as usize] as usize;
+                assert!(input_cell < self.visible_size.z);
 
                 let dictionary_start = field.dictionary_base as usize
                     + flat_index!(
@@ -273,23 +276,29 @@ impl Encoder {
             match max_activation_cell {
                 None => {
                     hidden[hidden_col] = max_complete_activation_cell as u16;
-                    self.hidden_max_activation[hidden_col] = max_complete_activation;
-                    self.hidden_learn_flag[hidden_col] = false;
+                    cols_max_activation[hidden_col] = max_complete_activation;
+                    cols_learn_flag[hidden_col] = false;
                 }
                 Some(cell) => {
                     hidden[hidden_col] = cell as u16;
-                    self.hidden_max_activation[hidden_col] = max_activation;
-                    self.hidden_learn_flag[hidden_col] = true;
+                    cols_max_activation[hidden_col] = max_activation;
+                    cols_learn_flag[hidden_col] = true;
                 }
             }
         }
 
-        hidden
+        (
+            hidden,
+            EncoderLearningData {
+                max_activations: cols_max_activation,
+                learn_flags: cols_learn_flag,
+            },
+        )
     }
 
     #[inline]
-    fn can_col_learn(&self, hidden_col: usize) -> bool {
-        if !self.hidden_learn_flag[hidden_col] {
+    fn can_col_learn(&self, hidden_col: usize, learning_data: &EncoderLearningData) -> bool {
+        if !learning_data.learn_flags[hidden_col] {
             return false;
         }
 
@@ -297,22 +306,22 @@ impl Encoder {
         let (start, end) = (start as usize, end as usize);
         let learning_field = &self.learning_field_lut[start..end];
 
-        let center_activation = self.hidden_max_activation[hidden_col];
+        let center_activation = learning_data.max_activations[hidden_col];
 
         let field_cnt = end - start + 1;
         let mut higher_neighbors = 0;
 
         for &neighbor_idx in learning_field {
             higher_neighbors +=
-                (self.hidden_max_activation[neighbor_idx as usize] > center_activation) as usize;
+                (learning_data.max_activations[neighbor_idx as usize] > center_activation) as usize;
         }
 
         higher_neighbors as f32 <= self.active_ratio * field_cnt as f32
     }
 
-    pub fn learn(&mut self, input: &[u16], hidden: &[u16]) {
+    pub fn learn(&mut self, input: &[u16], hidden: &[u16], learning_data: &EncoderLearningData) {
         for hidden_col in 0..self.hidden_size.cols {
-            if !self.can_col_learn(hidden_col) {
+            if !self.can_col_learn(hidden_col, learning_data) {
                 continue;
             }
 
