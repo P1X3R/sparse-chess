@@ -13,6 +13,9 @@ struct LocalField {
     weight_base: u32,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct DecoderLearningData(Box<[u16]>, Box<[i16]>, Box<[f32]>);
+
 #[derive(Debug)]
 pub struct Decoder {
     visible_size: CsdrSize,
@@ -139,8 +142,8 @@ impl Decoder {
         )
     }
 
-    pub fn forward(&self, concat: &[u16]) -> (Box<[u16]>, (Box<[i16]>, Box<[f32]>)) {
-        debug_assert_eq!(concat.len(), self.visible_size.cols);
+    pub fn forward(&self, concat: &[u16]) -> (Box<[u16]>, DecoderLearningData) {
+        assert_eq!(concat.len(), self.visible_size.cols);
 
         let mut hidden: Box<[u16]> = vec![0; self.hidden_size.cols].into_boxed_slice();
         let mut dendrite_activations: Box<[i16]> =
@@ -257,18 +260,20 @@ impl Decoder {
             hidden[hidden_col] = max_idx as u16;
         }
 
-        (hidden, (dendrite_activations, activations))
+        (
+            hidden,
+            DecoderLearningData(concat.into(), dendrite_activations, activations),
+        )
     }
 
     pub fn learn(
         &mut self,
         expected: &[u16], // Must be at current time step
-        concat: &[u16],   // Must be at previous time step
-        (dendrite_activations, activations): &(Box<[i16]>, Box<[f32]>), // Must be at previous time step
+        DecoderLearningData(concat, dendrite_activations, activations): &DecoderLearningData, // Must be at previous time step
     ) {
-        debug_assert!(expected.len() <= self.visible_size.cols);
-        debug_assert_eq!(concat.len(), self.visible_size.cols);
-        debug_assert_eq!(expected.len(), self.hidden_size.cols);
+        assert!(expected.len() <= self.visible_size.cols);
+        assert_eq!(concat.len(), self.visible_size.cols);
+        assert_eq!(expected.len(), self.hidden_size.cols);
 
         for hidden_col in 0..self.hidden_size.cols {
             for hidden_z in 0..self.hidden_size.z {
