@@ -8,7 +8,7 @@ const BYTE_INV: f32 = 1.0 / 255.0;
 #[derive(Debug)]
 struct LocalField {
     input_cell_idx: u32,
-    dictionary_base: u32,
+    weights_base: u32,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -41,7 +41,7 @@ pub struct Encoder {
     vigilance: f32,
     active_ratio: f32,
 
-    dictionary: Box<[u8]>,
+    weights: Box<[u8]>,
 }
 
 impl Encoder {
@@ -85,7 +85,7 @@ impl Encoder {
             vigilance: 0.9,
             active_ratio: 0.10,
 
-            dictionary: std::iter::repeat_with(|| rng.u8(0..=8))
+            weights: std::iter::repeat_with(|| rng.u8(0..=8))
                 .take(visible_size.z * hidden_size.cols * area * hidden_size.z)
                 .collect(),
         }
@@ -181,7 +181,7 @@ impl Encoder {
                             [visible_size.y, visible_size.x],
                             [visible_y as usize, visible_x as usize]
                         ) as u32,
-                        dictionary_base: flat_index!(
+                        weights_base: flat_index!(
                             [visible_size.z, hidden_size.cols, area, hidden_size.z],
                             [0, hidden_col, in_field_idx, 0]
                         ) as u32,
@@ -223,7 +223,7 @@ impl Encoder {
                 let input_cell = input[field.input_cell_idx as usize] as usize;
                 assert!(input_cell < self.visible_size.z);
 
-                let dictionary_start = field.dictionary_base as usize
+                let weights_start = field.weights_base as usize
                     + flat_index!(
                         [
                             self.visible_size.z,
@@ -233,12 +233,12 @@ impl Encoder {
                         ],
                         [input_cell, 0, 0, 0]
                     ) as usize;
-                let dictionary_end = dictionary_start + self.hidden_size.z;
+                let weights_end = weights_start + self.hidden_size.z;
 
-                let dictionary_col = &self.dictionary[dictionary_start..dictionary_end];
+                let weights_col = &self.weights[weights_start..weights_end];
 
                 for cell in 0..self.hidden_size.z {
-                    sum_col[cell] += dictionary_col[cell] as u16;
+                    sum_col[cell] += weights_col[cell] as u16;
                 }
             }
 
@@ -338,7 +338,7 @@ impl Encoder {
 
             for field in &self.local_field_lut[start..end] {
                 let input_cell = input[field.input_cell_idx as usize] as usize;
-                let dictionary_idx = field.dictionary_base as usize
+                let weights_idx = field.weights_base as usize
                     + flat_index!(
                         [
                             self.visible_size.z,
@@ -349,13 +349,13 @@ impl Encoder {
                         [input_cell, 0, 0, hidden_z]
                     ) as usize;
 
-                let old = self.dictionary[dictionary_idx];
-                self.dictionary[dictionary_idx] = if is_commited {
+                let old = self.weights[weights_idx];
+                self.weights[weights_idx] = if is_commited {
                     self.weight_deltas[old as usize]
                 } else {
                     255
                 };
-                self.hidden_totals[hidden_idx] += (self.dictionary[dictionary_idx] - old) as u16;
+                self.hidden_totals[hidden_idx] += (self.weights[weights_idx] - old) as u16;
             }
 
             self.is_commited[hidden_idx] = true;
