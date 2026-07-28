@@ -1,0 +1,204 @@
+use crate::model::{
+    coder::CsdrSize,
+    decoder::{Decoder, DecoderLearningData},
+    encoder::Encoder,
+};
+
+#[derive(Debug, Default)]
+struct LayerState {
+    ticks: usize,
+    hidden_history: Vec<u16>,
+    hidden_state: Vec<u16>,
+    prediction: Vec<u16>,
+    prev_decoder_data: Option<DecoderLearningData>,
+}
+
+#[derive(Debug)]
+pub struct SphLayer {
+    encoder: Encoder,
+    decoder: Decoder,
+    delay: usize,
+    state: LayerState,
+}
+
+#[derive(Debug)]
+pub struct Sph {
+    layers: Vec<SphLayer>,
+    input_cols: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct LayerParams {
+    pub decoder_lr: f32,
+    pub encoder_lr: f32,
+    pub radius: i16,
+    pub learning_radius: isize,
+    pub choice: f32,
+    pub vigilance: f32,
+    pub active_ratio: f32,
+    pub half_dendrites: usize,
+    pub delay: usize,
+}
+
+impl SphLayer {
+    pub fn new(encoder: Encoder, decoder: Decoder, delay: usize) -> Self {
+        let hidden_cols = encoder.hidden_size.cols;
+        let visible_cols = encoder.visible_size.cols;
+
+        Self {
+            encoder,
+            decoder,
+            delay,
+            state: LayerState {
+                ticks: 0,
+                hidden_history: Vec::with_capacity(hidden_cols * delay),
+                hidden_state: vec![0; hidden_cols],
+                prediction: vec![0; visible_cols],
+                prev_decoder_data: None,
+            },
+        }
+    }
+}
+
+impl Sph {
+    pub fn new(pipeline_sizes: &[(usize, usize, usize)], params: &[LayerParams]) -> Self {
+        assert!(
+            pipeline_sizes.len() > 1,
+            "The model must have at least an input and hidden state size"
+        );
+        assert_eq!(
+            pipeline_sizes.len(),
+            params.len() + 1,
+            "Params count must equal pipeline_sizes count minus 1"
+        );
+
+        let layers = pipeline_sizes
+            .windows(2)
+            .zip(params)
+            .enumerate()
+            .map(|(idx, (pair, layer_params))| {
+                let (prev_x, prev_y, prev_z) = pair[0];
+                let (size_x, size_y, size_z) = pair[1];
+                let upper_params = params.get(idx + 1);
+
+                assert!(layer_params.delay >= 1, "Delay must be at least 1");
+
+                let visible_size = CsdrSize::new(prev_x, prev_y, prev_z);
+                let hidden_size = CsdrSize::new(size_x, size_y, size_z);
+
+                let decoder_input_x = match upper_params {
+                    None => hidden_size.x,
+                    Some(p) => hidden_size.x + (hidden_size.x * p.delay),
+                };
+
+                let concat_size = CsdrSize::new(decoder_input_x, hidden_size.y, hidden_size.z);
+                let decoded_target_size =
+                    CsdrSize::new(prev_x * layer_params.delay, prev_y, prev_z);
+
+                SphLayer::new(
+                    Encoder::new(
+                        visible_size,
+                        hidden_size,
+                        layer_params.radius,
+                        layer_params.learning_radius,
+                        layer_params.encoder_lr,
+                        layer_params.choice,
+                        layer_params.vigilance,
+                        layer_params.active_ratio,
+                    ),
+                    Decoder::new(
+                        concat_size,
+                        decoded_target_size,
+                        layer_params.half_dendrites,
+                        layer_params.radius,
+                        layer_params.decoder_lr,
+                    ),
+                    layer_params.delay,
+                )
+            })
+            .collect();
+
+        Self {
+            layers,
+            input_cols: pipeline_sizes[0].0 * pipeline_sizes[0].1,
+        }
+    }
+
+    /// Returns the next input prediction
+    pub fn step(&mut self, input: &[u16], learn: bool) -> Vec<u16> {
+        assert_eq!(input.len(), self.input_cols, "Input dimension mismatch");
+
+        // --- Bottom -> Top Pass ---
+        let mut current_input = input;
+
+        for layer in &mut self.layers {
+            layer.state.ticks += 1;
+            layer.state.hidden_history.extend_from_slice(current_input);
+
+            if layer.state.ticks % layer.delay == 0 {
+                let (hidden, enc_data) = layer.encoder.forward(&layer.state.hidden_history);
+
+                if learn {
+                    layer
+                        .encoder
+                        .learn(&layer.state.hidden_history, &hidden, &enc_data);
+                }
+
+                layer.state.hidden_state = hidden.into();
+                layer.state.hidden_history.clear();
+            }
+
+            current_input = &layer.state.hidden_state;
+        }
+
+        // --- Top -> Bottom Pass ---
+        let mut feedback: Option<Vec<u16>> = None;
+        let num_layers = self.layers.len();
+
+        for idx in (0..num_layers).rev() {
+            let (left, right) = self.layers.split_at_mut(idx);
+            let layer = &mut right[0];
+
+            let expected_cols = layer.decoder.hidden_size.cols;
+
+            let target_data = if idx == 0 {
+                input
+            } else {
+                let lower = &left[idx - 1];
+                if lower.state.hidden_history.len() == expected_cols {
+                    &lower.state.hidden_history
+                } else {
+                    &lower.state.hidden_state
+                }
+            };
+
+            let decoder_input = match &feedback {
+                Some(fb) => {
+                    let mut concat = Vec::with_capacity(layer.state.hidden_state.len() + fb.len());
+                    concat.extend_from_slice(&layer.state.hidden_state);
+                    concat.extend_from_slice(fb);
+                    concat
+                }
+                None => layer.state.hidden_state.clone(),
+            };
+
+            if learn {
+                if let Some(prev_data) = layer.state.prev_decoder_data.take() {
+                    if target_data.len() == expected_cols {
+                        layer.decoder.learn(target_data, &prev_data);
+                    }
+                }
+            }
+
+            let (prediction, learning_data) = layer.decoder.forward(&decoder_input);
+            let pred_vec: Vec<u16> = prediction.into();
+
+            layer.state.prediction = pred_vec.clone();
+            layer.state.prev_decoder_data = Some(learning_data);
+
+            feedback = Some(pred_vec);
+        }
+
+        self.layers[0].state.prediction.clone()
+    }
+}
