@@ -51,6 +51,9 @@ impl Encoder {
         radius: i16,
         learning_radius: isize,
         lr: f32,
+        choice: f32,
+        vigilance: f32,
+        active_ratio: f32,
     ) -> Self {
         let diameter = radius * 2 + 1;
         let area = (diameter * diameter) as usize;
@@ -81,9 +84,9 @@ impl Encoder {
             hidden_totals: vec![0; hidden_size.flat].into_boxed_slice(),
             is_commited: vec![false; hidden_size.flat].into_boxed_slice(),
 
-            choice: 0.01,
-            vigilance: 0.9,
-            active_ratio: 0.10,
+            choice,
+            vigilance,
+            active_ratio,
 
             weights: std::iter::repeat_with(|| rng.u8(0..=8))
                 .take(visible_size.z * hidden_size.cols * area * hidden_size.z)
