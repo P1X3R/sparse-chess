@@ -6,8 +6,6 @@ use crate::model::{
 
 #[derive(Debug, Default)]
 struct LayerState {
-    ticks: usize,
-    hidden_history: Vec<u16>,
     hidden_state: Vec<u16>,
     prediction: Vec<u16>,
     prev_decoder_data: Option<DecoderLearningData>,
@@ -17,7 +15,6 @@ struct LayerState {
 pub struct SphLayer {
     encoder: Encoder,
     decoder: Decoder,
-    delay: usize,
     state: LayerState,
 }
 
@@ -37,21 +34,17 @@ pub struct LayerParams {
     pub vigilance: f32,
     pub active_ratio: f32,
     pub half_dendrites: usize,
-    pub delay: usize,
 }
 
 impl SphLayer {
-    pub fn new(encoder: Encoder, decoder: Decoder, delay: usize) -> Self {
+    pub fn new(encoder: Encoder, decoder: Decoder) -> Self {
         let hidden_cols = encoder.hidden_size.cols;
         let visible_cols = encoder.visible_size.cols;
 
         Self {
             encoder,
             decoder,
-            delay,
             state: LayerState {
-                ticks: 0,
-                hidden_history: Vec::with_capacity(hidden_cols * delay),
                 hidden_state: vec![0; hidden_cols],
                 prediction: vec![0; visible_cols],
                 prev_decoder_data: None,
@@ -81,19 +74,17 @@ impl Sph {
                 let (size_x, size_y, size_z) = pair[1];
                 let upper_params = params.get(idx + 1);
 
-                assert!(layer_params.delay >= 1, "Delay must be at least 1");
-
                 let visible_size = CsdrSize::new(prev_x, prev_y, prev_z);
                 let hidden_size = CsdrSize::new(size_x, size_y, size_z);
 
+                // With delay = 1, upper layer feedback size is simply upper hidden_size.x
                 let decoder_input_x = match upper_params {
                     None => hidden_size.x,
-                    Some(p) => hidden_size.x + (hidden_size.x * p.delay),
+                    Some(_) => hidden_size.x * 2, // hidden_state + top-down feedback
                 };
 
                 let concat_size = CsdrSize::new(decoder_input_x, hidden_size.y, hidden_size.z);
-                let decoded_target_size =
-                    CsdrSize::new(prev_x * layer_params.delay, prev_y, prev_z);
+                let decoded_target_size = visible_size;
 
                 SphLayer::new(
                     Encoder::new(
@@ -113,7 +104,6 @@ impl Sph {
                         layer_params.radius,
                         layer_params.decoder_lr,
                     ),
-                    layer_params.delay,
                 )
             })
             .collect();
@@ -124,7 +114,7 @@ impl Sph {
         }
     }
 
-    /// Returns the next input prediction
+    /// Processes a single input state and returns the predicted next state
     pub fn step(&mut self, input: &[u16], learn: bool) -> Vec<u16> {
         assert_eq!(input.len(), self.input_cols, "Input dimension mismatch");
 
@@ -132,22 +122,13 @@ impl Sph {
         let mut current_input = input;
 
         for layer in &mut self.layers {
-            layer.state.ticks += 1;
-            layer.state.hidden_history.extend_from_slice(current_input);
+            let (hidden, enc_data) = layer.encoder.forward(current_input);
 
-            if layer.state.ticks % layer.delay == 0 {
-                let (hidden, enc_data) = layer.encoder.forward(&layer.state.hidden_history);
-
-                if learn {
-                    layer
-                        .encoder
-                        .learn(&layer.state.hidden_history, &hidden, &enc_data);
-                }
-
-                layer.state.hidden_state = hidden.into();
-                layer.state.hidden_history.clear();
+            if learn {
+                layer.encoder.learn(current_input, &hidden, &enc_data);
             }
 
+            layer.state.hidden_state = hidden.into();
             current_input = &layer.state.hidden_state;
         }
 
@@ -159,17 +140,10 @@ impl Sph {
             let (left, right) = self.layers.split_at_mut(idx);
             let layer = &mut right[0];
 
-            let expected_cols = layer.decoder.hidden_size.cols;
-
             let target_data = if idx == 0 {
                 input
             } else {
-                let lower = &left[idx - 1];
-                if lower.state.hidden_history.len() == expected_cols {
-                    &lower.state.hidden_history
-                } else {
-                    &lower.state.hidden_state
-                }
+                &left[idx - 1].state.hidden_state
             };
 
             let decoder_input = match &feedback {
@@ -184,9 +158,7 @@ impl Sph {
 
             if learn {
                 if let Some(prev_data) = layer.state.prev_decoder_data.take() {
-                    if target_data.len() == expected_cols {
-                        layer.decoder.learn(target_data, &prev_data);
-                    }
+                    layer.decoder.learn(target_data, &prev_data);
                 }
             }
 

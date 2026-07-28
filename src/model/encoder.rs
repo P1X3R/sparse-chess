@@ -223,27 +223,25 @@ impl Encoder {
             let (start, end) = (start as usize, end as usize);
 
             for field in &self.local_field_lut[start..end] {
-                for visible in input.chunks_exact(self.visible_size.cols) {
-                    let input_cell = visible[field.input_cell_idx as usize] as usize;
-                    assert!(input_cell < self.visible_size.z);
+                let input_cell = input[field.input_cell_idx as usize] as usize;
+                assert!(input_cell < self.visible_size.z);
 
-                    let weights_start = field.weights_base as usize
-                        + flat_index!(
-                            [
-                                self.visible_size.z,
-                                self.hidden_size.cols,
-                                self.area,
-                                self.hidden_size.z
-                            ],
-                            [input_cell, 0, 0, 0]
-                        ) as usize;
-                    let weights_end = weights_start + self.hidden_size.z;
+                let weights_start = field.weights_base as usize
+                    + flat_index!(
+                        [
+                            self.visible_size.z,
+                            self.hidden_size.cols,
+                            self.area,
+                            self.hidden_size.z
+                        ],
+                        [input_cell, 0, 0, 0]
+                    ) as usize;
+                let weights_end = weights_start + self.hidden_size.z;
 
-                    let weights_col = &self.weights[weights_start..weights_end];
+                let weights_col = &self.weights[weights_start..weights_end];
 
-                    for cell in 0..self.hidden_size.z {
-                        sum_col[cell] += weights_col[cell] as u32;
-                    }
+                for cell in 0..self.hidden_size.z {
+                    sum_col[cell] += weights_col[cell] as u32;
                 }
             }
 
@@ -344,27 +342,25 @@ impl Encoder {
             let (start, end) = (start as usize, end as usize);
 
             for field in &self.local_field_lut[start..end] {
-                for visible in input.chunks_exact(self.visible_size.cols) {
-                    let input_cell = visible[field.input_cell_idx as usize] as usize;
-                    let weights_idx = field.weights_base as usize
-                        + flat_index!(
-                            [
-                                self.visible_size.z,
-                                self.hidden_size.cols,
-                                self.area,
-                                self.hidden_size.z
-                            ],
-                            [input_cell, 0, 0, hidden_z]
-                        ) as usize;
+                let input_cell = input[field.input_cell_idx as usize] as usize;
+                let weights_idx = field.weights_base as usize
+                    + flat_index!(
+                        [
+                            self.visible_size.z,
+                            self.hidden_size.cols,
+                            self.area,
+                            self.hidden_size.z
+                        ],
+                        [input_cell, 0, 0, hidden_z]
+                    ) as usize;
 
-                    let old = self.weights[weights_idx];
-                    self.weights[weights_idx] = if is_commited {
-                        self.weight_deltas[old as usize]
-                    } else {
-                        255
-                    };
-                    self.hidden_totals[hidden_idx] += (self.weights[weights_idx] - old) as u16;
-                }
+                let old = self.weights[weights_idx];
+                self.weights[weights_idx] = if is_commited {
+                    self.weight_deltas[old as usize]
+                } else {
+                    255
+                };
+                self.hidden_totals[hidden_idx] += (self.weights[weights_idx] - old) as u16;
             }
 
             self.is_commited[hidden_idx] = true;
