@@ -33,7 +33,7 @@ pub struct Encoder {
 
     weight_deltas: [u8; 256],
 
-    hidden_sum: Box<[u16]>,
+    hidden_sum: Box<[u32]>,
     hidden_totals: Box<[u16]>,
     is_commited: Box<[bool]>,
 
@@ -238,7 +238,7 @@ impl Encoder {
                 let weights_col = &self.weights[weights_start..weights_end];
 
                 for cell in 0..self.hidden_size.z {
-                    sum_col[cell] += weights_col[cell] as u16;
+                        sum_col[cell] += weights_col[cell] as u32;
                 }
             }
 
