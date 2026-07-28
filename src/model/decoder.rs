@@ -14,12 +14,12 @@ struct LocalField {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct DecoderLearningData(Box<[u16]>, Box<[i16]>, Box<[f32]>);
+pub struct DecoderLearningData(pub Box<[u16]>, Box<[i16]>, Box<[f32]>);
 
 #[derive(Debug)]
 pub struct Decoder {
-    visible_size: CsdrSize,
-    hidden_size: CsdrSize,
+    pub(crate) visible_size: CsdrSize,
+    pub(crate) hidden_size: CsdrSize,
 
     area: usize,
 
@@ -223,6 +223,7 @@ impl Decoder {
                 let mut cell_activation = 0;
 
                 for dendrite in 0..self.dendrites {
+                    // ReLU
                     dendritic_activations_cell[dendrite] =
                         dendritic_activations_cell[dendrite].max(0);
 
@@ -271,9 +272,13 @@ impl Decoder {
         expected: &[u16], // Must be at current time step
         DecoderLearningData(concat, dendrite_activations, activations): &DecoderLearningData, // Must be at previous time step
     ) {
-        assert!(expected.len() <= self.visible_size.cols);
-        assert_eq!(concat.len(), self.visible_size.cols);
         assert_eq!(expected.len(), self.hidden_size.cols);
+        assert_eq!(concat.len(), self.visible_size.cols);
+        assert_eq!(activations.len(), self.hidden_size.flat);
+        assert_eq!(
+            dendrite_activations.len(),
+            self.hidden_size.flat * self.dendrites
+        );
 
         for hidden_col in 0..self.hidden_size.cols {
             for hidden_z in 0..self.hidden_size.z {
