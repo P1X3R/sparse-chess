@@ -245,12 +245,12 @@ impl Decoder {
                 let cell_activation = cell_activation_raw as f32 * activation_scale;
 
                 if cell_activation > max_activation {
-                    let shift = (max_activation as f32) - (cell_activation as f32);
-                    activation_sum = activation_sum * fast_math::exp2(shift) + 1.0;
+                    let shift = max_activation - cell_activation;
+                    activation_sum = activation_sum * fast_math::exp(shift) + 1.0;
                     max_activation = cell_activation;
                 } else {
-                    let shift = (cell_activation as f32) - (max_activation as f32);
-                    activation_sum += fast_math::exp2(shift);
+                    let shift = cell_activation - max_activation;
+                    activation_sum += fast_math::exp(shift);
                 }
 
                 activation_col[hidden_z] = cell_activation;
@@ -258,8 +258,8 @@ impl Decoder {
 
             let activation_sum_inv = 1.0 / activation_sum;
             for hidden_z in 0..self.hidden_size.z {
-                let shift = activation_col[hidden_z] - (max_activation as f32);
-                activation_col[hidden_z] = fast_math::exp2(shift) * activation_sum_inv;
+                let shift = activation_col[hidden_z] - max_activation;
+                activation_col[hidden_z] = fast_math::exp(shift) * activation_sum_inv;
             }
 
             let (max_idx, _) = activation_col
