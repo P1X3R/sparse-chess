@@ -309,11 +309,12 @@ impl Decoder {
                 let error = input_cell_val - activation;
 
                 for dendrite in 0..self.dendrites {
-                    let delta = if dendrite >= self.half_dendrites {
-                        self.lr * heavystep(dendritic_cell[dendrite]) * error
+                    let sign = if dendrite >= self.half_dendrites {
+                        1.0
                     } else {
-                        self.lr * -heavystep(dendritic_cell[dendrite]) * error
+                        -1.0
                     };
+                    let delta = self.lr * sign * heavystep(dendritic_cell[dendrite]) * error;
 
                     self.weight_deltas[dendrite] =
                         rand_round(delta, &mut self.rng).max(-128.0).min(127.0) as i8;
