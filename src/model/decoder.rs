@@ -317,7 +317,7 @@ impl Decoder {
                     let delta = self.lr * sign * heavystep(dendritic_cell[dendrite]) * error;
 
                     self.weight_deltas[dendrite] =
-                        rand_round(delta, &mut self.rng).max(-128.0).min(127.0) as i8;
+                        rand_round(delta, &mut self.rng).clamp(-128.0, 127.0) as i8;
                 }
 
                 for field in &self.local_field_lut[start..end] {
@@ -339,7 +339,8 @@ impl Decoder {
                     let weights_cell = &mut self.weights[weights_start..weights_end];
 
                     for dendrite in 0..self.dendrites {
-                        weights_cell[dendrite] += self.weight_deltas[dendrite];
+                        weights_cell[dendrite] =
+                            weights_cell[dendrite].saturating_add(self.weight_deltas[dendrite]);
                     }
                 }
             }
