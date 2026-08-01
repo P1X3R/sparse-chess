@@ -34,6 +34,8 @@ pub struct Decoder {
     weight_deltas: Box<[i8]>,
     weights: Box<[i8]>,
 
+    scale: f32,
+
     rng: fastrand::Rng,
 }
 
@@ -43,6 +45,7 @@ impl Decoder {
         hidden_size: CsdrSize,
         half_dendrites: usize,
         radius: i16,
+        scale: f32,
         lr: f32,
     ) -> Self {
         let mut rng = fastrand::Rng::new();
@@ -71,6 +74,8 @@ impl Decoder {
             weights: std::iter::repeat_with(|| rng.i8(-12..=12))
                 .take(visible_size.z * hidden_size.cols * area * hidden_size.z * dendrites)
                 .collect(),
+
+            scale: scale / 127.0,
 
             rng,
         }
@@ -142,7 +147,7 @@ impl Decoder {
         )
     }
 
-    pub fn forward(&self, concat: &[u16]) -> (Box<[u16]>, DecoderLearningData) {
+    pub fn forward(&mut self, concat: &[u16]) -> (Box<[u16]>, DecoderLearningData) {
         assert_eq!(concat.len(), self.visible_size.cols);
 
         let mut hidden: Box<[u16]> = vec![0; self.hidden_size.cols].into_boxed_slice();
@@ -205,8 +210,11 @@ impl Decoder {
                 }
             }
 
-            let mut max_activation = i16::MIN;
+            let mut max_activation = f32::MIN;
             let mut activation_sum = 0.0;
+            let field_count = (end - start) as f32;
+            let dendrite_scale = (1.0 / field_count) * self.scale;
+            let activation_scale = 1.0 / self.dendrites as f32;
             let activation_col = &mut activations
                 [hidden_activation_col_base..(hidden_activation_col_base + self.hidden_size.z)];
 
@@ -220,19 +228,21 @@ impl Decoder {
                 let dendritic_activations_cell =
                     &mut dendrite_activations[dendritic_start..dendritic_end];
 
-                let mut cell_activation = 0;
+                let cell_activation_raw: i16 = (0..self.dendrites)
+                    .map(|dendrite| {
+                        let da = &mut dendritic_activations_cell[dendrite];
 
-                for dendrite in 0..self.dendrites {
-                    // ReLU
-                    dendritic_activations_cell[dendrite] =
-                        dendritic_activations_cell[dendrite].max(0);
+                        let non_linear = (*da).max(0) as f32; // ReLU
+                        *da = rand_round(non_linear * dendrite_scale, &mut self.rng) as i16;
 
-                    cell_activation += if dendrite >= self.half_dendrites {
-                        dendritic_activations_cell[dendrite]
-                    } else {
-                        -dendritic_activations_cell[dendrite]
-                    };
-                }
+                        if dendrite >= self.half_dendrites {
+                            *da
+                        } else {
+                            -*da
+                        }
+                    })
+                    .sum();
+                let cell_activation = cell_activation_raw as f32 * activation_scale;
 
                 if cell_activation > max_activation {
                     let shift = (max_activation as f32) - (cell_activation as f32);
@@ -243,7 +253,7 @@ impl Decoder {
                     activation_sum += fast_math::exp2(shift);
                 }
 
-                activation_col[hidden_z] = cell_activation as f32;
+                activation_col[hidden_z] = cell_activation;
             }
 
             let activation_sum_inv = 1.0 / activation_sum;
@@ -281,6 +291,9 @@ impl Decoder {
         );
 
         for hidden_col in 0..self.hidden_size.cols {
+            let (start, end) = self.local_field_offsets[hidden_col];
+            let (start, end) = (start as usize, end as usize);
+
             for hidden_z in 0..self.hidden_size.z {
                 let hidden_idx = flat_index!(
                     [self.hidden_size.cols, self.hidden_size.z],
@@ -305,9 +318,6 @@ impl Decoder {
                     self.weight_deltas[dendrite] =
                         rand_round(delta, &mut self.rng).max(-128.0).min(127.0) as i8;
                 }
-
-                let (start, end) = self.local_field_offsets[hidden_col];
-                let (start, end) = (start as usize, end as usize);
 
                 for field in &self.local_field_lut[start..end] {
                     let concat_col = field.concat_cell_idx as usize;

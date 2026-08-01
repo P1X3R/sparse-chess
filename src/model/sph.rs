@@ -34,6 +34,7 @@ pub struct LayerParams {
     pub vigilance: f32,
     pub active_ratio: f32,
     pub half_dendrites: usize,
+    pub decoder_scale: f32,
 }
 
 impl SphLayer {
@@ -77,10 +78,9 @@ impl Sph {
                 let visible_size = CsdrSize::new(prev_x, prev_y, prev_z);
                 let hidden_size = CsdrSize::new(size_x, size_y, size_z);
 
-                // With delay = 1, upper layer feedback size is simply upper hidden_size.x
                 let decoder_input_x = match upper_params {
                     None => hidden_size.x,
-                    Some(_) => hidden_size.x * 2, // hidden_state + top-down feedback
+                    Some(_) => hidden_size.x * 2,
                 };
 
                 let concat_size = CsdrSize::new(decoder_input_x, hidden_size.y, hidden_size.z);
@@ -102,6 +102,7 @@ impl Sph {
                         decoded_target_size,
                         layer_params.half_dendrites,
                         layer_params.radius,
+                        layer_params.decoder_scale,
                         layer_params.decoder_lr,
                     ),
                 )
