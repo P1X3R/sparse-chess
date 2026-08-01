@@ -86,6 +86,8 @@ impl Sph {
                 let concat_size = CsdrSize::new(decoder_input_x, hidden_size.y, hidden_size.z);
                 let decoded_target_size = visible_size;
 
+                assert_ne!(layer_params.decoder_scale, 0.0);
+
                 SphLayer::new(
                     Encoder::new(
                         visible_size,
