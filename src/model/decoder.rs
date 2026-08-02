@@ -14,7 +14,7 @@ struct LocalField {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct DecoderLearningData(pub Box<[u16]>, Box<[i16]>, Box<[f32]>);
+pub struct DecoderLearningData(pub Box<[u16]>, Box<[i16]>, pub Box<[f32]>);
 
 #[derive(Debug)]
 pub struct Decoder {
