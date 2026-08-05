@@ -8,7 +8,8 @@ pub struct CsdrSize {
 }
 
 impl CsdrSize {
-    pub fn new(x: usize, y: usize, z: usize) -> Self {
+    #[inline]
+    pub const fn new(x: usize, y: usize, z: usize) -> Self {
         return Self {
             x,
             y,
@@ -66,6 +67,43 @@ impl FieldBounds {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct SoftmaxState {
+    max_logit: f32,
+    sum: f32,
+}
+
+impl SoftmaxState {
+    #[inline]
+    pub(crate) fn new() -> Self {
+        Self {
+            max_logit: f32::NEG_INFINITY,
+            sum: 0.0,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn update(&mut self, logit: f32) {
+        if logit > self.max_logit {
+            let shift = self.max_logit - logit;
+            self.sum = self.sum * fast_math::exp(shift) + 1.0;
+            self.max_logit = logit;
+        } else {
+            let shift = logit - self.max_logit;
+            self.sum += fast_math::exp(shift);
+        }
+    }
+
+    #[inline]
+    pub(crate) fn normalize(&self, x: &mut [f32]) {
+        let sum_inv = 1.0 / self.sum;
+        for logit in x {
+            let shift = *logit - self.max_logit;
+            *logit = fast_math::exp(shift) * sum_inv;
+        }
+    }
+}
+
 #[macro_export]
 macro_rules! flat_index {
     ([$d0:expr $(, $d_tail:expr)*], [$i0:expr $(, $i_tail:expr)*]) => {
@@ -85,14 +123,25 @@ macro_rules! flat_index {
     };
 }
 
-#[inline(always)]
-pub fn rand_round(x: f32, rng: &mut fastrand::Rng) -> f32 {
+#[inline]
+pub(crate) fn rand_round(x: f32) -> f32 {
     let floor = x.floor();
     let fract = x - floor;
 
-    if rng.f32_inclusive() < fract {
+    if fastrand::f32_inclusive() < fract {
         floor + 1.0 // Round up
     } else {
         floor // Round down
     }
+}
+
+#[inline]
+pub(crate) fn column_wise_one_hot(col: &[f32]) -> u16 {
+    let (max_cell, _) = col
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.total_cmp(b))
+        .unwrap();
+
+    max_cell as u16
 }
