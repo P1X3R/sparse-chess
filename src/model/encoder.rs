@@ -33,7 +33,6 @@ pub struct Encoder {
 
     weight_deltas: [u8; 256],
 
-    hidden_sum: Box<[u32]>,
     hidden_totals: Box<[u16]>,
     is_commited: Box<[bool]>,
 
@@ -80,7 +79,6 @@ impl Encoder {
                 (w as u8).saturating_add((lr * (255.0 - w as f32)).ceil() as u8)
             }),
 
-            hidden_sum: vec![0; hidden_size.flat].into_boxed_slice(),
             hidden_totals: vec![0; hidden_size.flat].into_boxed_slice(),
             is_commited: vec![false; hidden_size.flat].into_boxed_slice(),
 
@@ -202,10 +200,36 @@ impl Encoder {
         )
     }
 
-    pub fn forward(&mut self, input: &[u16]) -> (Box<[u16]>, EncoderLearningData) {
+    #[inline(always)]
+    fn calc_hidden_sum(&self, input: &[u16], local_field: &[LocalField], sum_col: &mut [u32]) {
+        for field in local_field {
+            let input_cell = input[field.input_cell_idx as usize] as usize;
+            assert!(input_cell < self.visible_size.z);
+
+            let weights_start = field.weights_base as usize
+                + flat_index!(
+                    [
+                        self.visible_size.z,
+                        self.hidden_size.cols,
+                        self.area,
+                        self.hidden_size.z
+                    ],
+                    [input_cell, 0, 0, 0]
+                ) as usize;
+            let weights_end = weights_start + self.hidden_size.z;
+
+            let weights_col = &self.weights[weights_start..weights_end];
+
+            for cell in 0..self.hidden_size.z {
+                sum_col[cell] += weights_col[cell] as u32;
+            }
+        }
+    }
+
+    pub fn forward(&self, input: &[u16]) -> (Box<[u16]>, EncoderLearningData) {
         assert_eq!(input.len() % self.visible_size.cols, 0);
 
-        self.hidden_sum.fill(0);
+        let mut hidden_sum = vec![0; self.hidden_size.flat].into_boxed_slice();
         let mut hidden = vec![0; self.hidden_size.cols].into_boxed_slice();
         let mut cols_max_activation = vec![0.0; self.hidden_size.cols].into_boxed_slice();
         let mut cols_learn_flag = vec![false; self.hidden_size.cols].into_boxed_slice();
@@ -215,35 +239,14 @@ impl Encoder {
                 flat_index!([self.hidden_size.cols, self.hidden_size.z], [hidden_col, 0]);
             let sum_col_end = sum_col_start + self.hidden_size.z;
             let sum_col_range = sum_col_start..sum_col_end;
-            let sum_col = &mut self.hidden_sum[sum_col_range.clone()];
+            let sum_col = &mut hidden_sum[sum_col_range.clone()];
             let total_col = &self.hidden_totals[sum_col_range.clone()];
             let commited_col = &self.is_commited[sum_col_range];
 
             let (start, end) = self.local_field_offsets[hidden_col];
             let (start, end) = (start as usize, end as usize);
 
-            for field in &self.local_field_lut[start..end] {
-                let input_cell = input[field.input_cell_idx as usize] as usize;
-                assert!(input_cell < self.visible_size.z);
-
-                let weights_start = field.weights_base as usize
-                    + flat_index!(
-                        [
-                            self.visible_size.z,
-                            self.hidden_size.cols,
-                            self.area,
-                            self.hidden_size.z
-                        ],
-                        [input_cell, 0, 0, 0]
-                    ) as usize;
-                let weights_end = weights_start + self.hidden_size.z;
-
-                let weights_col = &self.weights[weights_start..weights_end];
-
-                for cell in 0..self.hidden_size.z {
-                    sum_col[cell] += weights_col[cell] as u32;
-                }
-            }
+            self.calc_hidden_sum(input, &self.local_field_lut[start..end], sum_col);
 
             let clamped_area = end - start;
             let count_all = clamped_area as f32 * self.visible_size.z as f32;
