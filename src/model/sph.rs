@@ -159,10 +159,8 @@ impl Sph {
                 None => layer.state.hidden_state.clone(),
             };
 
-            if learn {
-                if let Some(prev_data) = layer.state.prev_decoder_data.take() {
-                    layer.decoder.learn(target_data, &prev_data);
-                }
+            if learn && let Some(prev_data) = layer.state.prev_decoder_data.take() {
+                layer.decoder.learn(target_data, &prev_data);
             }
 
             let (prediction, learning_data) = layer.decoder.forward(&decoder_input);
@@ -175,5 +173,11 @@ impl Sph {
         }
 
         self.layers[0].state.prediction.clone()
+    }
+
+    pub fn clean_learn(&mut self) {
+        for layer in self.layers.iter_mut() {
+            layer.state.prev_decoder_data = None;
+        }
     }
 }

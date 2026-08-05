@@ -1,5 +1,5 @@
 use crate::model::{
-    coder::CsdrSize,
+    coder::{CsdrSize, SoftmaxState, column_wise_one_hot},
     decoder::{Decoder, DecoderLearningData},
     encoder::Encoder,
     sph::{LayerParams, Sph},
@@ -22,26 +22,31 @@ pub struct ChessModel {
 
     prev_policy_data: Option<DecoderLearningData>,
     prev_value_data: Option<DecoderLearningData>,
+
+    bottom_dendrites: usize,
 }
 
 impl ChessModel {
+    pub const INPUT_SIZE: CsdrSize = CsdrSize::new(9, 8, 16);
+    pub const POLICY_SIZE: CsdrSize = CsdrSize::new(1, 1, 4672);
+    pub const VALUE_SIZE: CsdrSize = CsdrSize::new(1, 1, 256);
+
     pub fn new(pipeline_sizes: &[(usize, usize, usize)], params: &[LayerParams]) -> Self {
+        assert_eq!(ChessModel::POLICY_SIZE.flat, ChessModel::POLICY_SIZE.z);
+        assert_eq!(ChessModel::VALUE_SIZE.flat, ChessModel::VALUE_SIZE.z);
         assert!(params.len() >= 2);
         assert_eq!(pipeline_sizes.len(), params.len());
 
         let (bi_x, bi_y, bi_z) = pipeline_sizes[0];
         let bottom_params = params[0];
 
-        let input_size = CsdrSize::new(9, 8, 16);
         let body_input_size = CsdrSize::new(bi_x, bi_y, bi_z);
         let concat_size = CsdrSize::new(bi_x * 2, bi_y, bi_z);
-        let policy_size = CsdrSize::new(1, 1, 4672);
-        let value_size = CsdrSize::new(1, 1, 256);
 
         ChessModel {
             body: Sph::new(pipeline_sizes, &params[1..]),
             bottom_encoder: Encoder::new(
-                input_size,
+                ChessModel::INPUT_SIZE,
                 body_input_size,
                 bottom_params.radius,
                 bottom_params.learning_radius,
@@ -52,7 +57,7 @@ impl ChessModel {
             ),
             policy_head: Decoder::new(
                 concat_size,
-                policy_size,
+                ChessModel::POLICY_SIZE,
                 bottom_params.half_dendrites,
                 bottom_params.radius,
                 bottom_params.decoder_scale,
@@ -60,7 +65,7 @@ impl ChessModel {
             ),
             value_head: Decoder::new(
                 concat_size,
-                value_size,
+                ChessModel::VALUE_SIZE,
                 bottom_params.half_dendrites,
                 bottom_params.radius,
                 bottom_params.decoder_scale,
@@ -69,11 +74,64 @@ impl ChessModel {
 
             prev_policy_data: None,
             prev_value_data: None,
+
+            bottom_dendrites: bottom_params.half_dendrites * 2,
         }
     }
 
-    pub fn step(&mut self, input: &[u16], expected: Option<(&[u16], &[u16])>) -> ModelOutput {
-        let learn = expected.is_some();
+    fn step_policy(
+        &self,
+        concat: &[u16],
+        legality_mask: &[bool],
+    ) -> (Box<[f32]>, Box<[u16]>, DecoderLearningData) {
+        assert_eq!(legality_mask.len(), ChessModel::POLICY_SIZE.flat);
+
+        let mut dendrite_activations: Box<[i16]> =
+            vec![0; ChessModel::POLICY_SIZE.flat * self.bottom_dendrites].into_boxed_slice();
+
+        let mut policy: Box<[f32]> = vec![0.0; ChessModel::POLICY_SIZE.z].into_boxed_slice();
+        let mut activations: Box<[f32]> = vec![0.0; ChessModel::POLICY_SIZE.z].into_boxed_slice();
+
+        let mut policy_softmax = SoftmaxState::new();
+        let mut activation_softmax = SoftmaxState::new();
+
+        self.policy_head.compute_activations(
+            concat,
+            0,
+            &mut dendrite_activations,
+            |hidden_z, cell_activation| {
+                let masked_activation = if legality_mask[hidden_z] {
+                    cell_activation
+                } else {
+                    f32::NEG_INFINITY
+                };
+
+                policy_softmax.update(masked_activation);
+                activation_softmax.update(cell_activation);
+
+                policy[hidden_z] = masked_activation;
+                activations[hidden_z] = cell_activation;
+            },
+        );
+
+        policy_softmax.normalize(&mut policy);
+        activation_softmax.normalize(&mut activations);
+
+        (
+            policy,
+            Box::new([column_wise_one_hot(&activations)]),
+            DecoderLearningData(concat.into(), dendrite_activations, activations),
+        )
+    }
+
+    pub fn step(
+        &mut self,
+        input: &[u16],
+        legality_mask: &[bool],
+        expected: Option<(&[u16], &[u16])>,
+    ) -> ModelOutput {
+        let learn =
+            expected.is_some() && self.prev_policy_data.is_some() && self.prev_value_data.is_some();
 
         let (hidden, enc_data) = self.bottom_encoder.forward(input);
         if learn {
@@ -95,18 +153,22 @@ impl ChessModel {
             }
         }
 
-        let (policy, policy_data) = self.policy_head.forward(&concat);
+        let (policy, policy_max, policy_data) = self.step_policy(&concat, legality_mask);
         let (value, value_data) = self.value_head.forward(&concat);
-
-        let policy_activations = policy_data.2.clone();
 
         self.prev_policy_data = Some(policy_data);
         self.prev_value_data = Some(value_data);
 
         ModelOutput {
-            policy_max: policy,
-            policy: policy_activations,
-            value: value,
+            policy_max,
+            policy,
+            value,
         }
+    }
+
+    pub fn clean_learn(&mut self) {
+        self.prev_policy_data = None;
+        self.prev_value_data = None;
+        self.body.clean_learn();
     }
 }
