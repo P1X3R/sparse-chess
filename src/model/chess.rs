@@ -90,37 +90,28 @@ impl ChessModel {
             vec![0; ChessModel::POLICY_SIZE.flat * self.bottom_dendrites].into_boxed_slice();
 
         let mut policy: Box<[f32]> = vec![0.0; ChessModel::POLICY_SIZE.z].into_boxed_slice();
-        let mut activations: Box<[f32]> = vec![0.0; ChessModel::POLICY_SIZE.z].into_boxed_slice();
-
         let mut policy_softmax = SoftmaxState::new();
-        let mut activation_softmax = SoftmaxState::new();
 
         self.policy_head.compute_activations(
             concat,
             0,
             &mut dendrite_activations,
-            |hidden_z, cell_activation| {
-                let masked_activation = if legality_mask[hidden_z] {
-                    cell_activation
-                } else {
-                    f32::NEG_INFINITY
-                };
+            |z, cell_activation| {
+                if !legality_mask[z] {
+                    return;
+                }
 
-                policy_softmax.update(masked_activation);
-                activation_softmax.update(cell_activation);
-
-                policy[hidden_z] = masked_activation;
-                activations[hidden_z] = cell_activation;
+                policy_softmax.update(cell_activation);
+                policy[z] = cell_activation;
             },
         );
 
         policy_softmax.normalize(&mut policy);
-        activation_softmax.normalize(&mut activations);
 
         (
-            policy,
-            Box::new([column_wise_one_hot(&activations)]),
-            DecoderLearningData(concat.into(), dendrite_activations, activations),
+            policy.clone(),
+            Box::new([column_wise_one_hot(&policy)]),
+            DecoderLearningData(concat.into(), dendrite_activations, policy),
         )
     }
 
