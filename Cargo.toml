@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 fast-math = "0.1.1"
 fastrand = "2.4.1"
+shakmaty = "0.30.1"
 
 [profile.release]
 opt-level = 3
