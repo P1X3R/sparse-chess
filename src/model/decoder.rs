@@ -14,11 +14,11 @@ struct LocalField {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct DecoderLearningData(
-    pub(crate) Box<[u16]>,
-    pub(crate) Box<[i16]>,
-    pub(crate) Box<[f32]>,
-);
+pub struct DecoderLearningData {
+    pub(crate) concat: Box<[u16]>,
+    pub(crate) dendrite_activations: Box<[i16]>,
+    pub(crate) activations: Box<[f32]>,
+}
 
 #[derive(Debug)]
 pub struct Decoder {
@@ -287,7 +287,11 @@ impl Decoder {
 
         (
             hidden,
-            DecoderLearningData(concat.into(), dendrite_activations, activations),
+            DecoderLearningData {
+                concat: concat.into(),
+                dendrite_activations,
+                activations,
+            },
         )
     }
 
@@ -306,7 +310,11 @@ impl Decoder {
     pub fn learn(
         &mut self,
         expected: &[u16], // Must be at current time step
-        DecoderLearningData(concat, dendrite_activations, activations): &DecoderLearningData, // Must be at previous time step
+        DecoderLearningData {
+            concat,
+            dendrite_activations,
+            activations,
+        }: &DecoderLearningData, // Must be at previous time step
     ) {
         assert_eq!(expected.len(), self.hidden_size.cols);
         assert_eq!(concat.len(), self.visible_size.cols);

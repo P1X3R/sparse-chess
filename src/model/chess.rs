@@ -123,7 +123,11 @@ impl ChessModel {
         (
             policy.clone(),
             Box::new([column_wise_one_hot(&policy)]),
-            DecoderLearningData(concat.into(), dendrite_activations, policy),
+            DecoderLearningData {
+                concat: concat.into(),
+                dendrite_activations,
+                activations: policy,
+            },
         )
     }
 
