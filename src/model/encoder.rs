@@ -1,15 +1,9 @@
 use crate::{
     flat_index,
-    model::coder::{CsdrSize, FieldBounds},
+    model::coder::{CsdrSize, FieldBounds, LocalField},
 };
 
 const BYTE_INV: f32 = 1.0 / 255.0;
-
-#[derive(Debug)]
-struct LocalField {
-    input_cell_idx: u32,
-    weights_base: u32,
-}
 
 #[derive(Debug, Clone, Default)]
 pub struct EncoderLearningData {

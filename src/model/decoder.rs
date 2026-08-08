@@ -1,16 +1,12 @@
 use crate::{
     flat_index,
-    model::coder::{CsdrSize, FieldBounds, SoftmaxState, column_wise_one_hot, rand_round},
+    model::coder::{
+        CsdrSize, FieldBounds, LocalField, SoftmaxState, column_wise_one_hot, rand_round,
+    },
 };
 
 fn heavystep(x: i16) -> f32 {
     if x <= 0 { 0.0 } else { 1.0 }
-}
-
-#[derive(Debug)]
-struct LocalField {
-    concat_cell_idx: u32,
-    weight_base: u32,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -117,11 +113,11 @@ impl Decoder {
                     );
 
                     local_field_lut.push(LocalField {
-                        concat_cell_idx: flat_index!(
+                        input_cell_idx: flat_index!(
                             [visible_size.y, visible_size.x],
                             [visible_y as usize, visible_x as usize]
                         ) as u32,
-                        weight_base: flat_index!(
+                        weights_base: flat_index!(
                             [
                                 visible_size.z,
                                 hidden_size.cols,
@@ -154,9 +150,9 @@ impl Decoder {
         dendrite_activations: &mut [i16],
     ) {
         for field in local_field {
-            let concat_cell = concat[field.concat_cell_idx as usize] as usize;
+            let concat_cell = concat[field.input_cell_idx as usize] as usize;
 
-            let concat_cell_base = field.weight_base as usize
+            let concat_cell_base = field.weights_base as usize
                 + flat_index!(
                     [
                         self.visible_size.z,
@@ -350,10 +346,10 @@ impl Decoder {
                 }
 
                 for field in &self.local_field_lut[start..end] {
-                    let concat_col = field.concat_cell_idx as usize;
+                    let concat_col = field.input_cell_idx as usize;
                     let concat_cell = concat[concat_col] as usize;
 
-                    let weights_start = field.weight_base as usize
+                    let weights_start = field.weights_base as usize
                         + flat_index!(
                             [
                                 self.visible_size.z,

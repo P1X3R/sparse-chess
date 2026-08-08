@@ -68,6 +68,12 @@ impl FieldBounds {
 }
 
 #[derive(Debug)]
+pub(crate) struct LocalField {
+    pub(crate) input_cell_idx: u32,
+    pub(crate) weights_base: u32,
+}
+
+#[derive(Debug)]
 pub(crate) struct SoftmaxState {
     max_logit: f32,
     sum: f32,
