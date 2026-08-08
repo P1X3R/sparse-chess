@@ -226,7 +226,7 @@ impl Decoder {
         );
 
         let field_count = (end - start) as f32;
-        let dendrite_scale = (1.0 / field_count) * self.scale;
+        let dendrite_scale = (self.scale / field_count).sqrt();
         let activation_scale = 1.0 / self.dendrites as f32;
 
         for hidden_z in 0..self.hidden_size.z {
