@@ -1,7 +1,10 @@
 use crate::{
     flat_index,
-    model::coder::{CsdrSize, FieldBounds, LocalField},
+    model::coder::{CsdrSize, FieldBounds, FieldEntry, ReceptiveField},
 };
+
+type LocalField = ReceptiveField<FieldEntry>;
+type LearningField = ReceptiveField<u32>;
 
 const BYTE_INV: f32 = 1.0 / 255.0;
 
@@ -16,24 +19,15 @@ pub struct EncoderLearningData {
 pub struct Encoder {
     pub(crate) visible_size: CsdrSize,
     pub(crate) hidden_size: CsdrSize,
-
     area: usize,
-
-    local_field_lut: Box<[LocalField]>,
-    local_field_offsets: Box<[(u32, u32)]>,
-
-    learning_field_lut: Box<[u32]>,
-    learning_field_offsets: Box<[(u32, u32)]>,
-
+    receptive_field: LocalField,
+    learning_field: LearningField,
     weight_deltas: [u8; 256],
-
     hidden_totals: Box<[u16]>,
-    is_commited: Box<[bool]>,
-
+    is_committed: Box<[bool]>,
     choice: f32,
     vigilance: f32,
     active_ratio: f32,
-
     weights: Box<[u8]>,
 }
 
@@ -50,48 +44,35 @@ impl Encoder {
     ) -> Self {
         let diameter = radius * 2 + 1;
         let area = (diameter * diameter) as usize;
-        let (learning_field_lut, learning_field_offsets) =
-            Encoder::init_learning_field_lut(&hidden_size, learning_radius);
-        let (local_field_lut, local_field_offsets) =
-            Encoder::init_local_field_lut(&hidden_size, &visible_size, radius);
+        let learning_field = Encoder::init_learning_field_lut(&hidden_size, learning_radius);
+        let receptive_field = Encoder::init_local_field_lut(&hidden_size, &visible_size, radius);
 
         let mut rng = fastrand::Rng::new();
 
         Self {
             visible_size,
             hidden_size,
-
             area,
-
-            local_field_lut,
-            local_field_offsets,
-
-            learning_field_lut,
-            learning_field_offsets,
-
+            receptive_field,
+            learning_field,
             weight_deltas: std::array::from_fn(|w| {
                 (w as u8).saturating_add((lr * (255.0 - w as f32)).ceil() as u8)
             }),
-
             hidden_totals: vec![0; hidden_size.flat].into_boxed_slice(),
-            is_commited: vec![false; hidden_size.flat].into_boxed_slice(),
-
+            is_committed: vec![false; hidden_size.flat].into_boxed_slice(),
             choice,
             vigilance,
             active_ratio,
-
             weights: std::iter::repeat_with(|| rng.u8(0..=8))
                 .take(visible_size.z * hidden_size.cols * area * hidden_size.z)
                 .collect(),
         }
     }
 
-    fn init_learning_field_lut(
-        hidden_size: &CsdrSize,
-        learning_radius: isize,
-    ) -> (Box<[u32]>, Box<[(u32, u32)]>) {
+    fn init_learning_field_lut(hidden_size: &CsdrSize, learning_radius: isize) -> LearningField {
         let diameter = (2 * learning_radius + 1) as usize;
         let area = diameter * diameter;
+
         let mut learning_field_lut = Vec::with_capacity(hidden_size.cols * area);
         let mut learning_field_offsets = Vec::with_capacity(hidden_size.cols);
 
@@ -129,17 +110,17 @@ impl Encoder {
             learning_field_offsets.push((start_idx, end));
         }
 
-        (
-            learning_field_lut.into_boxed_slice(),
-            learning_field_offsets.into_boxed_slice(),
-        )
+        LearningField {
+            lut: learning_field_lut.into_boxed_slice(),
+            offsets: learning_field_offsets.into_boxed_slice(),
+        }
     }
 
     fn init_local_field_lut(
         hidden_size: &CsdrSize,
         visible_size: &CsdrSize,
         radius: i16,
-    ) -> (Box<[LocalField]>, Box<[(u32, u32)]>) {
+    ) -> LocalField {
         let diameter = (2 * radius + 1) as usize;
         let area = diameter * diameter;
         let ratio = (
@@ -171,7 +152,7 @@ impl Encoder {
                         [in_field_y as usize, in_field_x as usize]
                     );
 
-                    local_field_lut.push(LocalField {
+                    local_field_lut.push(FieldEntry {
                         input_cell_idx: flat_index!(
                             [visible_size.y, visible_size.x],
                             [visible_y as usize, visible_x as usize]
@@ -188,30 +169,45 @@ impl Encoder {
             local_field_offsets.push((start_idx, end));
         }
 
-        (
-            local_field_lut.into_boxed_slice(),
-            local_field_offsets.into_boxed_slice(),
+        ReceptiveField {
+            lut: local_field_lut.into_boxed_slice(),
+            offsets: local_field_offsets.into_boxed_slice(),
+        }
+    }
+
+    #[inline(always)]
+    fn get_weight_idx(
+        &self,
+        visible_z: usize,
+        hidden_col: usize,
+        area_idx: usize,
+        hidden_z: usize,
+    ) -> usize {
+        flat_index!(
+            [
+                self.visible_size.z,
+                self.hidden_size.cols,
+                self.area,
+                self.hidden_size.z
+            ],
+            [visible_z, hidden_col, area_idx, hidden_z]
         )
     }
 
     #[inline(always)]
-    fn calc_hidden_sum(&self, input: &[u16], local_field: &[LocalField], sum_col: &mut [u32]) {
+    fn calc_hidden_sum(&self, input: &[u16], local_field: &[FieldEntry], sum_col: &mut [u32]) {
+        debug_assert!(
+            input
+                .iter()
+                .all(|&cell| (cell as usize) < self.visible_size.z)
+        );
+
         for field in local_field {
             let input_cell = input[field.input_cell_idx as usize] as usize;
-            assert!(input_cell < self.visible_size.z);
 
-            let weights_start = field.weights_base as usize
-                + flat_index!(
-                    [
-                        self.visible_size.z,
-                        self.hidden_size.cols,
-                        self.area,
-                        self.hidden_size.z
-                    ],
-                    [input_cell, 0, 0, 0]
-                ) as usize;
+            let weights_start =
+                field.weights_base as usize + self.get_weight_idx(input_cell, 0, 0, 0);
             let weights_end = weights_start + self.hidden_size.z;
-
             let weights_col = &self.weights[weights_start..weights_end];
 
             for cell in 0..self.hidden_size.z {
@@ -235,14 +231,12 @@ impl Encoder {
             let sum_col_range = sum_col_start..sum_col_end;
             let sum_col = &mut hidden_sum[sum_col_range.clone()];
             let total_col = &self.hidden_totals[sum_col_range.clone()];
-            let commited_col = &self.is_commited[sum_col_range];
+            let committed_col = &self.is_committed[sum_col_range];
+            let local_field = self.receptive_field.get_col(hidden_col);
 
-            let (start, end) = self.local_field_offsets[hidden_col];
-            let (start, end) = (start as usize, end as usize);
+            self.calc_hidden_sum(input, local_field, sum_col);
 
-            self.calc_hidden_sum(input, &self.local_field_lut[start..end], sum_col);
-
-            let clamped_area = end - start;
+            let clamped_area = local_field.len();
             let count_all = clamped_area as f32 * self.visible_size.z as f32;
             let count_except = clamped_area as f32 * (self.visible_size.z - 1) as f32;
             let beta = self.choice + count_all;
@@ -260,7 +254,7 @@ impl Encoder {
                 let match_score = complemented / count_except;
                 let activation = complemented / (beta - total);
 
-                if (!commited_col[cell] || match_score >= self.vigilance)
+                if (!committed_col[cell] || match_score >= self.vigilance)
                     && activation > max_activation
                 {
                     max_activation = activation;
@@ -302,13 +296,10 @@ impl Encoder {
             return false;
         }
 
-        let (start, end) = self.learning_field_offsets[hidden_col];
-        let (start, end) = (start as usize, end as usize);
-        let learning_field = &self.learning_field_lut[start..end];
-
+        let learning_field = self.learning_field.get_col(hidden_col);
         let center_activation = learning_data.max_activations[hidden_col];
 
-        let field_cnt = end - start;
+        let field_cnt = learning_field.len();
         let mut higher_neighbors = 0;
 
         for &neighbor_idx in learning_field {
@@ -333,26 +324,15 @@ impl Encoder {
                 [hidden_col, hidden_z]
             );
 
-            let is_commited = self.is_commited[hidden_idx];
+            let is_committed = self.is_committed[hidden_idx];
 
-            let (start, end) = self.local_field_offsets[hidden_col];
-            let (start, end) = (start as usize, end as usize);
-
-            for field in &self.local_field_lut[start..end] {
+            for field in self.receptive_field.get_col(hidden_col) {
                 let input_cell = input[field.input_cell_idx as usize] as usize;
-                let weights_idx = field.weights_base as usize
-                    + flat_index!(
-                        [
-                            self.visible_size.z,
-                            self.hidden_size.cols,
-                            self.area,
-                            self.hidden_size.z
-                        ],
-                        [input_cell, 0, 0, hidden_z]
-                    ) as usize;
+                let weights_idx =
+                    field.weights_base as usize + self.get_weight_idx(input_cell, 0, 0, hidden_z);
 
                 let old = self.weights[weights_idx];
-                self.weights[weights_idx] = if is_commited {
+                self.weights[weights_idx] = if is_committed {
                     self.weight_deltas[old as usize]
                 } else {
                     255
@@ -360,7 +340,7 @@ impl Encoder {
                 self.hidden_totals[hidden_idx] += (self.weights[weights_idx] - old) as u16;
             }
 
-            self.is_commited[hidden_idx] = true;
+            self.is_committed[hidden_idx] = true;
         }
     }
 }

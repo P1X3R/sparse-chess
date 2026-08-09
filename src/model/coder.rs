@@ -68,9 +68,23 @@ impl FieldBounds {
 }
 
 #[derive(Debug)]
-pub(crate) struct LocalField {
+pub(crate) struct FieldEntry {
     pub(crate) input_cell_idx: u32,
     pub(crate) weights_base: u32,
+}
+
+#[derive(Debug)]
+pub(crate) struct ReceptiveField<T> {
+    pub lut: Box<[T]>,
+    pub offsets: Box<[(u32, u32)]>,
+}
+
+impl<T> ReceptiveField<T> {
+    #[inline]
+    pub fn get_col(&self, hidden_col: usize) -> &[T] {
+        let (start, end) = self.offsets[hidden_col];
+        &self.lut[(start as usize)..(end as usize)]
+    }
 }
 
 #[derive(Debug)]
