@@ -2,6 +2,7 @@ use crate::{
     coder::{CsdrSize, SoftmaxState},
     decoder::{Decoder, DecoderLearningData},
     encoder::Encoder,
+    pre_encoders::move_enc::MOVE_STRS,
     sph::{LayerParams, Sph},
 };
 
@@ -39,8 +40,8 @@ pub struct ChessModel {
 
 impl ChessModel {
     pub const INPUT_SIZE: CsdrSize = CsdrSize::new(9, 8, 16);
-    pub const POLICY_SIZE: CsdrSize = CsdrSize::new(1, 1, 1858);
-    pub const VALUE_SIZE: CsdrSize = CsdrSize::new(1, 1, 3);
+    pub const POLICY_SIZE: CsdrSize = CsdrSize::new(1, 1, MOVE_STRS.len());
+    pub const VALUE_SIZE: CsdrSize = CsdrSize::new(1, 1, 3); // WDL
 
     pub fn new(pipeline_sizes: &[(usize, usize, usize)], params: &[LayerParams]) -> Self {
         assert_eq!(ChessModel::POLICY_SIZE.flat, ChessModel::POLICY_SIZE.z);
