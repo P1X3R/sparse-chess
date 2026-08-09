@@ -1,9 +1,9 @@
 use crate::{
-    flat_index,
-    model::coder::{
+    coder::{
         CsdrSize, FieldBounds, FieldEntry, ReceptiveField, SoftmaxState, column_wise_one_hot,
         rand_round,
     },
+    flat_index,
 };
 
 type LocalField = ReceptiveField<FieldEntry>;

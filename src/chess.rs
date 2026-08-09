@@ -1,4 +1,4 @@
-use crate::model::{
+use crate::{
     coder::{CsdrSize, SoftmaxState, column_wise_one_hot},
     decoder::{Decoder, DecoderLearningData},
     encoder::Encoder,

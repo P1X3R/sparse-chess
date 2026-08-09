@@ -1,6 +1,6 @@
 use crate::{
+    coder::{CsdrSize, FieldBounds, FieldEntry, ReceptiveField},
     flat_index,
-    model::coder::{CsdrSize, FieldBounds, FieldEntry, ReceptiveField},
 };
 
 type LocalField = ReceptiveField<FieldEntry>;
@@ -237,8 +237,9 @@ impl Encoder {
             self.calc_hidden_sum(input, local_field, sum_col);
 
             let clamped_area = local_field.len();
-            let count_all = clamped_area as f32 * self.visible_size.z as f32;
-            let count_except = clamped_area as f32 * (self.visible_size.z - 1) as f32;
+            let count_all = (clamped_area * self.visible_size.z) as f32;
+            let count_except = count_all - clamped_area as f32;
+            let count_except_inv = 1.0 / count_except;
             let beta = self.choice + count_all;
 
             let mut max_activation = 0.0;
@@ -251,7 +252,7 @@ impl Encoder {
                 let sum = sum_col[cell] as f32 * BYTE_INV;
                 let total = total_col[cell] as f32 * BYTE_INV;
                 let complemented = sum - total + count_except;
-                let match_score = complemented / count_except;
+                let match_score = complemented * count_except_inv;
                 let activation = complemented / (beta - total);
 
                 if (!committed_col[cell] || match_score >= self.vigilance)
@@ -300,12 +301,12 @@ impl Encoder {
         let center_activation = learning_data.max_activations[hidden_col];
 
         let field_cnt = learning_field.len();
-        let mut higher_neighbors = 0;
-
-        for &neighbor_idx in learning_field {
-            higher_neighbors +=
-                (learning_data.max_activations[neighbor_idx as usize] > center_activation) as usize;
-        }
+        let higher_neighbors = learning_field
+            .iter()
+            .filter(|&&neighbor_idx| {
+                learning_data.max_activations[neighbor_idx as usize] > center_activation
+            })
+            .count();
 
         higher_neighbors as f32 <= self.active_ratio * field_cnt as f32
     }

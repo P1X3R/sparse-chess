@@ -1,8 +1,8 @@
 use shakmaty::{CastlingSide, Chess, Position, Square};
 
 use crate::{
+    chess::{ChessModel, PosAuxiliarDim},
     flat_index,
-    model::chess::{ChessModel, PosAuxiliarDim},
 };
 
 pub fn encode_position(pos: &Chess) -> Vec<u16> {

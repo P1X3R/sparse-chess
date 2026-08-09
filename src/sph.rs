@@ -1,4 +1,4 @@
-use crate::model::{
+use crate::{
     coder::CsdrSize,
     decoder::{Decoder, DecoderLearningData},
     encoder::Encoder,
