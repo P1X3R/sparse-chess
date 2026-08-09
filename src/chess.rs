@@ -40,7 +40,7 @@ pub struct ChessModel {
 
 impl ChessModel {
     pub const INPUT_SIZE: CsdrSize = CsdrSize::new(9, 8, 16);
-    pub const POLICY_SIZE: CsdrSize = CsdrSize::new(1, 1, 4672);
+    pub const POLICY_SIZE: CsdrSize = CsdrSize::new(1, 1, 1858);
     pub const VALUE_SIZE: CsdrSize = CsdrSize::new(1, 1, 256);
 
     pub fn new(pipeline_sizes: &[(usize, usize, usize)], params: &[LayerParams]) -> Self {
