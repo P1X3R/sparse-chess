@@ -1,5 +1,5 @@
 use crate::{
-    coder::{CsdrSize, SoftmaxState, column_wise_one_hot},
+    coder::{CsdrSize, SoftmaxState},
     decoder::{Decoder, DecoderLearningData},
     encoder::Encoder,
     sph::{LayerParams, Sph},
@@ -19,9 +19,8 @@ impl PosAuxiliarDim {
 
 #[derive(Debug)]
 pub struct ModelOutput {
-    pub policy_max: Box<[u16]>,
     pub policy: Box<[f32]>,
-    pub value: Box<[u16]>,
+    pub value: Box<[f32]>,
 }
 
 #[derive(Debug)]
@@ -41,7 +40,7 @@ pub struct ChessModel {
 impl ChessModel {
     pub const INPUT_SIZE: CsdrSize = CsdrSize::new(9, 8, 16);
     pub const POLICY_SIZE: CsdrSize = CsdrSize::new(1, 1, 1858);
-    pub const VALUE_SIZE: CsdrSize = CsdrSize::new(1, 1, 256);
+    pub const VALUE_SIZE: CsdrSize = CsdrSize::new(1, 1, 3);
 
     pub fn new(pipeline_sizes: &[(usize, usize, usize)], params: &[LayerParams]) -> Self {
         assert_eq!(ChessModel::POLICY_SIZE.flat, ChessModel::POLICY_SIZE.z);
@@ -95,7 +94,7 @@ impl ChessModel {
         &self,
         concat: &[u16],
         legality_mask: &[bool],
-    ) -> (Box<[f32]>, Box<[u16]>, DecoderLearningData) {
+    ) -> (Box<[f32]>, DecoderLearningData) {
         assert_eq!(legality_mask.len(), ChessModel::POLICY_SIZE.flat);
 
         let mut dendrite_activations: Box<[i16]> =
@@ -122,7 +121,6 @@ impl ChessModel {
 
         (
             policy.clone(),
-            Box::new([column_wise_one_hot(&policy)]),
             DecoderLearningData {
                 concat: concat.into(),
                 dendrite_activations,
@@ -160,17 +158,14 @@ impl ChessModel {
             }
         }
 
-        let (policy, policy_max, policy_data) = self.step_policy(&concat, legality_mask);
-        let (value, value_data) = self.value_head.forward(&concat);
+        let (policy, policy_data) = self.step_policy(&concat, legality_mask);
+        let (_, value_data) = self.value_head.forward(&concat);
+        let value = value_data.activations.clone();
 
         self.prev_policy_data = Some(policy_data);
         self.prev_value_data = Some(value_data);
 
-        ModelOutput {
-            policy_max,
-            policy,
-            value,
-        }
+        ModelOutput { policy, value }
     }
 
     pub fn clean_learning_state(&mut self) {
