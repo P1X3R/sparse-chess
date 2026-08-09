@@ -173,9 +173,9 @@ impl ChessModel {
         }
     }
 
-    pub fn clean_learn(&mut self) {
+    pub fn clean_learning_state(&mut self) {
         self.prev_policy_data = None;
         self.prev_value_data = None;
-        self.body.clean_learn();
+        self.body.clean_learning_state();
     }
 }

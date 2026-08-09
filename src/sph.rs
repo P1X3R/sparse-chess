@@ -175,7 +175,7 @@ impl Sph {
         self.layers[0].state.prediction.clone()
     }
 
-    pub fn clean_learn(&mut self) {
+    pub fn clean_learning_state(&mut self) {
         for layer in self.layers.iter_mut() {
             layer.state.prev_decoder_data = None;
         }
