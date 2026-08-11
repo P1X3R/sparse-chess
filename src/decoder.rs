@@ -1,7 +1,6 @@
 use crate::{
     coder::{
-        CsdrSize, FieldBounds, FieldEntry, ReceptiveField, SoftmaxState, column_wise_one_hot,
-        rand_round,
+        CsdrSize, FieldBounds, FieldEntry, ReceptiveField, column_wise_one_hot, rand_round, softmax,
     },
     flat_index,
 };
@@ -252,8 +251,6 @@ impl Decoder {
             let hidden_activation_col_base =
                 flat_index!([self.hidden_size.cols, self.hidden_size.z], [hidden_col, 0]);
 
-            let mut activation_softmax = SoftmaxState::new();
-
             let activation_col = &mut activations
                 [hidden_activation_col_base..(hidden_activation_col_base + self.hidden_size.z)];
 
@@ -261,13 +258,10 @@ impl Decoder {
                 concat,
                 hidden_col,
                 &mut dendrite_activations,
-                |hidden_z, cell_activation| {
-                    activation_softmax.update(cell_activation);
-                    activation_col[hidden_z] = cell_activation;
-                },
+                |hidden_z, cell_activation| activation_col[hidden_z] = cell_activation,
             );
 
-            activation_softmax.normalize(activation_col);
+            softmax(activation_col);
             hidden[hidden_col] = column_wise_one_hot(activation_col);
         }
 

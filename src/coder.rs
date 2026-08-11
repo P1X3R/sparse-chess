@@ -87,40 +87,19 @@ impl<T> ReceptiveField<T> {
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct SoftmaxState {
-    max_logit: f32,
-    sum: f32,
-}
+#[inline]
+pub(crate) fn softmax(x: &mut [f32]) {
+    let mut sum = 0.0;
+    let max_logit = x.iter().fold(f32::NEG_INFINITY, |l, max| max.max(l));
 
-impl SoftmaxState {
-    #[inline]
-    pub(crate) fn new() -> Self {
-        Self {
-            max_logit: f32::NEG_INFINITY,
-            sum: 0.0,
-        }
+    for logit in x.iter_mut() {
+        *logit = (*logit - max_logit).exp();
+        sum += *logit;
     }
 
-    #[inline]
-    pub(crate) fn update(&mut self, logit: f32) {
-        if logit > self.max_logit {
-            let shift = self.max_logit - logit;
-            self.sum = self.sum * fast_math::exp(shift) + 1.0;
-            self.max_logit = logit;
-        } else {
-            let shift = logit - self.max_logit;
-            self.sum += fast_math::exp(shift);
-        }
-    }
-
-    #[inline]
-    pub(crate) fn normalize(&self, x: &mut [f32]) {
-        let sum_inv = 1.0 / self.sum;
-        for logit in x {
-            let shift = *logit - self.max_logit;
-            *logit = fast_math::exp(shift) * sum_inv;
-        }
+    let sum_inv = 1.0 / sum;
+    for logit in x {
+        *logit *= sum_inv;
     }
 }
 

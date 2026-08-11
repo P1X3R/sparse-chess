@@ -1,5 +1,5 @@
 use crate::{
-    coder::{CsdrSize, SoftmaxState},
+    coder::{CsdrSize, softmax},
     decoder::{Decoder, DecoderLearningData},
     encoder::Encoder,
     pre_encoders::move_enc::MOVE_STRS,
@@ -100,25 +100,22 @@ impl ChessModel {
 
         let mut dendrite_activations: Box<[i16]> =
             vec![0; ChessModel::POLICY_SIZE.flat * self.bottom_dendrites].into_boxed_slice();
-
         let mut policy: Box<[f32]> = vec![0.0; ChessModel::POLICY_SIZE.z].into_boxed_slice();
-        let mut policy_softmax = SoftmaxState::new();
 
         self.policy_head.compute_activations(
             concat,
             0,
             &mut dendrite_activations,
             |z, cell_activation| {
-                if !legality_mask[z] {
-                    return;
+                policy[z] = if legality_mask[z] {
+                    cell_activation
+                } else {
+                    f32::NEG_INFINITY
                 }
-
-                policy_softmax.update(cell_activation);
-                policy[z] = cell_activation;
             },
         );
 
-        policy_softmax.normalize(&mut policy);
+        softmax(&mut policy);
 
         (
             policy.clone(),
