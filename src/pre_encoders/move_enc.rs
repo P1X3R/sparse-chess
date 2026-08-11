@@ -183,8 +183,8 @@ fn char_to_promo(c: char) -> u16 {
 fn uci_to_packed_int(uci: &str) -> u16 {
     assert!(uci.len() >= 4);
 
-    let from_str = &uci[0..1];
-    let to_str = &uci[2..3];
+    let from_str = &uci[0..2];
+    let to_str = &uci[2..4];
     let promo_char = uci.chars().nth(4).unwrap_or('0');
 
     match (Square::from_str(from_str), Square::from_str(to_str)) {
@@ -192,7 +192,10 @@ fn uci_to_packed_int(uci: &str) -> u16 {
             [64, 64, 4],
             [from_sq as u16, to_sq as u16, char_to_promo(promo_char)]
         ),
-        _ => panic!("unable to pack {} into int", uci),
+        _ => panic!(
+            "unable to pack {} into int (from: {}, to: {})",
+            uci, from_str, to_str
+        ),
     }
 }
 
