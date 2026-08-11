@@ -1,6 +1,6 @@
 use std::{collections::HashMap, str::FromStr, sync::LazyLock};
 
-use shakmaty::{CastlingMode, CastlingSide, Chess, Color, Move, Square, uci::UciMove};
+use shakmaty::{CastlingMode, CastlingSide, Chess, Color, Move, Position, Square, uci::UciMove};
 
 use crate::flat_index;
 
@@ -173,10 +173,9 @@ static MOVE_TO_INDEX: LazyLock<HashMap<u16, usize>> = LazyLock::new(|| {
 
 fn char_to_promo(c: char) -> u16 {
     match c {
-        'n' => 1,
-        'b' => 2,
-        'r' => 3,
-        'q' => 4,
+        'q' => 1,
+        'r' => 2,
+        'b' => 3,
         _ => 0,
     }
 }
@@ -190,7 +189,7 @@ fn uci_to_packed_int(uci: &str) -> u16 {
 
     match (Square::from_str(from_str), Square::from_str(to_str)) {
         (Ok(from_sq), Ok(to_sq)) => flat_index!(
-            [64, 64, 5],
+            [64, 64, 4],
             [from_sq as u16, to_sq as u16, char_to_promo(promo_char)]
         ),
         _ => panic!("unable to pack {} into int", uci),
@@ -230,9 +229,28 @@ fn flip_rank_char(c: char) -> char {
     char::from(one + (7 - rank))
 }
 
+/// Decodes a move index back into a `shakmaty::Move`.
 pub fn decode_move_idx(idx: usize, pos: &Chess) -> Option<Move> {
-    MOVE_STRS
-        .get(idx)
-        .and_then(|str| UciMove::from_str(str).ok())
-        .and_then(|uci| uci.to_move(pos).ok())
+    let mut uci_str = MOVE_STRS.get(idx)?.to_string();
+
+    if pos.turn() == Color::Black {
+        uci_str = flip_uci_string(&uci_str);
+    }
+
+    let uci_move = UciMove::from_str(&uci_str).ok()?;
+
+    if let Ok(m) = uci_move.to_move(pos) {
+        return Some(m);
+    }
+
+    if uci_str.len() == 4 {
+        let knight_promoted_uci = format!("{}n", uci_str);
+        if let Ok(uci_knight) = UciMove::from_str(&knight_promoted_uci) {
+            if let Ok(m) = uci_knight.to_move(pos) {
+                return Some(m);
+            }
+        }
+    }
+
+    None
 }
