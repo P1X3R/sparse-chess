@@ -7,14 +7,14 @@ use crate::{
 
 type LocalField = ReceptiveField<FieldEntry>;
 
-fn unit_step(x: i16) -> f32 {
-    if x <= 0 { 0.0 } else { 1.0 }
+fn unit_step(x: f32) -> f32 {
+    if x <= 0.0 { 0.0 } else { 1.0 }
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct DecoderLearningData {
     pub(crate) concat: Box<[u16]>,
-    pub(crate) dendrite_activations: Box<[i16]>,
+    pub(crate) dendrite_activations: Box<[f32]>,
     pub(crate) activations: Box<[f32]>,
 }
 
@@ -156,7 +156,7 @@ impl Decoder {
         concat: &[u16],
         hidden_dendritic_col_base: usize,
         local_field: &[FieldEntry],
-        dendrite_activations: &mut [i16],
+        dendrite_activations: &mut [f32],
     ) {
         for field in local_field {
             let concat_cell = concat[field.input_cell_idx as usize] as usize;
@@ -179,7 +179,7 @@ impl Decoder {
                     &mut dendrite_activations[dendritic_start..dendritic_end];
 
                 for dendrite in 0..self.dendrites {
-                    dendritic_activations_cell[dendrite] += weights_cell[dendrite] as i16;
+                    dendritic_activations_cell[dendrite] += weights_cell[dendrite] as f32;
                 }
             }
         }
@@ -190,7 +190,7 @@ impl Decoder {
         &self,
         concat: &[u16],
         hidden_col: usize,
-        dendrite_activations: &mut [i16],
+        dendrite_activations: &mut [f32],
         mut yield_activation: F,
     ) where
         F: FnMut(usize, f32), // (hidden_z, cell_activation)
@@ -223,17 +223,17 @@ impl Decoder {
             let dendritic_end = dendritic_start + self.dendrites;
             let dendritic_cell = &mut dendrite_activations[dendritic_start..dendritic_end];
 
-            let mut cell_activation_raw = 0i16;
+            let mut cell_activation_raw = 0.0;
             for d in 0..self.dendrites {
                 let da = &mut dendritic_cell[d];
-                let non_linear = (*da).max(0) as f32; // ReLU
-                *da = rand_round(non_linear * dendrite_scale) as i16;
+                let non_linear = (*da).max(0.0); // ReLU
+                *da = non_linear * dendrite_scale;
 
                 let val = if d >= self.half_dendrites { *da } else { -*da };
                 cell_activation_raw += val;
             }
 
-            let cell_activation = cell_activation_raw as f32 * activation_scale;
+            let cell_activation = cell_activation_raw * activation_scale;
 
             yield_activation(hidden_z, cell_activation);
         }
@@ -243,8 +243,8 @@ impl Decoder {
         assert_eq!(concat.len(), self.visible_size.cols);
 
         let mut hidden: Box<[u16]> = vec![0; self.hidden_size.cols].into_boxed_slice();
-        let mut dendrite_activations: Box<[i16]> =
-            vec![0; self.hidden_size.flat * self.dendrites].into_boxed_slice();
+        let mut dendrite_activations: Box<[f32]> =
+            vec![0.0; self.hidden_size.flat * self.dendrites].into_boxed_slice();
         let mut activations: Box<[f32]> = vec![0.0; self.hidden_size.flat].into_boxed_slice();
 
         for hidden_col in 0..self.hidden_size.cols {
@@ -276,7 +276,7 @@ impl Decoder {
     }
 
     #[inline(always)]
-    fn calc_weight_delta(&self, dendrite: usize, dendritic_cell: &[i16], error: f32) -> i8 {
+    fn calc_weight_delta(&self, dendrite: usize, dendritic_cell: &[f32], error: f32) -> i8 {
         let sign = if dendrite >= self.half_dendrites {
             1.0
         } else {
@@ -284,7 +284,7 @@ impl Decoder {
         };
         let delta = self.lr * sign * unit_step(dendritic_cell[dendrite]) * error;
 
-        rand_round(delta).clamp(-128.0, 127.0) as i8
+        rand_round(delta) as i8
     }
 
     pub fn learn(

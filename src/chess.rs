@@ -98,8 +98,8 @@ impl ChessModel {
     ) -> (Box<[f32]>, DecoderLearningData) {
         assert_eq!(legality_mask.len(), ChessModel::POLICY_SIZE.flat);
 
-        let mut dendrite_activations: Box<[i16]> =
-            vec![0; ChessModel::POLICY_SIZE.flat * self.bottom_dendrites].into_boxed_slice();
+        let mut dendrite_activations: Box<[f32]> =
+            vec![0.0; ChessModel::POLICY_SIZE.flat * self.bottom_dendrites].into_boxed_slice();
         let mut policy: Box<[f32]> = vec![0.0; ChessModel::POLICY_SIZE.z].into_boxed_slice();
 
         self.policy_head.compute_activations(
