@@ -1,3 +1,5 @@
+use rayon::prelude::*;
+
 use crate::{
     coder::{
         CsdrSize, FieldBounds, FieldEntry, ReceptiveField, column_wise_one_hot, rand_round, softmax,
@@ -57,7 +59,7 @@ impl Decoder {
             dendrites,
             lr,
             weights: std::iter::repeat_with(|| rng.i8(-12..=12))
-                .take(visible_size.z * hidden_size.cols * area * hidden_size.z * dendrites)
+                .take(hidden_size.cols * visible_size.z * area * hidden_size.z * dendrites)
                 .collect(),
             scale: scale / 127.0,
         }
@@ -107,13 +109,13 @@ impl Decoder {
                         ) as u32,
                         weights_base: flat_index!(
                             [
-                                visible_size.z,
                                 hidden_size.cols,
+                                visible_size.z,
                                 area,
                                 hidden_size.z,
                                 dendrites
                             ],
-                            [0, hidden_col, in_field_idx, 0, 0]
+                            [hidden_col, 0, in_field_idx, 0, 0]
                         ) as u32,
                     });
                 }
@@ -140,13 +142,13 @@ impl Decoder {
     ) -> usize {
         flat_index!(
             [
-                self.visible_size.z,
                 self.hidden_size.cols,
+                self.visible_size.z,
                 self.area,
                 self.hidden_size.z,
                 self.dendrites
             ],
-            [concat_cell, hidden_col, area_idx, hidden_z, dendrite]
+            [hidden_col, concat_cell, area_idx, hidden_z, dendrite]
         )
     }
 
@@ -276,13 +278,19 @@ impl Decoder {
     }
 
     #[inline(always)]
-    fn calc_weight_delta(&self, dendrite: usize, dendritic_cell: &[f32], error: f32) -> i8 {
-        let sign = if dendrite >= self.half_dendrites {
+    fn calc_weight_delta(
+        half_dendrites: usize,
+        lr: f32,
+        dendrite: usize,
+        dendritic_cell: &[f32],
+        error: f32,
+    ) -> i8 {
+        let sign = if dendrite >= half_dendrites {
             1.0
         } else {
             -1.0
         };
-        let delta = self.lr * sign * unit_step(dendritic_cell[dendrite]) * error;
+        let delta = lr * sign * unit_step(dendritic_cell[dendrite]) * error;
 
         rand_round(delta) as i8
     }
@@ -304,45 +312,67 @@ impl Decoder {
             self.hidden_size.flat * self.dendrites
         );
 
-        let mut weight_deltas = vec![0; self.dendrites].into_boxed_slice();
+        let dendrite_chunk_size = self.hidden_size.z * self.dendrites;
+        let col_weights_len = self.visible_size.z * self.area * self.hidden_size.z * self.dendrites;
 
-        for hidden_col in 0..self.hidden_size.cols {
-            let local_field = self.receptive_field.get_col(hidden_col);
+        self.weights
+            .par_chunks_mut(col_weights_len)
+            .zip(activations.par_chunks(self.hidden_size.z))
+            .zip(dendrite_activations.par_chunks(dendrite_chunk_size))
+            .zip(expected.par_iter())
+            .enumerate()
+            .for_each(
+                |(hidden_col, (((col_weights, col_activations), col_dendrite_acts), &exp_z))| {
+                    let local_field = self.receptive_field.get_col(hidden_col);
+                    let mut weight_deltas = vec![0; self.dendrites];
 
-            for hidden_z in 0..self.hidden_size.z {
-                let hidden_idx = flat_index!(
-                    [self.hidden_size.cols, self.hidden_size.z],
-                    [hidden_col, hidden_z]
-                );
-                let dendritic_start =
-                    flat_index!([self.hidden_size.flat, self.dendrites], [hidden_idx, 0]);
-                let dendritic_end = dendritic_start + self.dendrites;
-                let dendritic_cell = &dendrite_activations[dendritic_start..dendritic_end];
+                    for hidden_z in 0..self.hidden_size.z {
+                        let dendritic_start = hidden_z * self.dendrites;
+                        let dendritic_end = dendritic_start + self.dendrites;
+                        let dendritic_cell = &col_dendrite_acts[dendritic_start..dendritic_end];
 
-                let activation = activations[hidden_idx];
-                let input_cell_val = f32::from(hidden_z == expected[hidden_col] as usize);
-                let error = input_cell_val - activation;
+                        let activation = col_activations[hidden_z];
+                        let input_cell_val = f32::from(hidden_z == exp_z as usize);
+                        let error = input_cell_val - activation;
 
-                for dendrite in 0..self.dendrites {
-                    weight_deltas[dendrite] =
-                        self.calc_weight_delta(dendrite, dendritic_cell, error);
-                }
+                        for dendrite in 0..self.dendrites {
+                            weight_deltas[dendrite] = Decoder::calc_weight_delta(
+                                self.half_dendrites,
+                                self.lr,
+                                dendrite,
+                                dendritic_cell,
+                                error,
+                            );
+                        }
 
-                for field in local_field {
-                    let concat_col = field.input_cell_idx as usize;
-                    let concat_cell = concat[concat_col] as usize;
+                        for field in local_field {
+                            let concat_col = field.input_cell_idx as usize;
+                            let concat_cell = concat[concat_col] as usize;
 
-                    let weights_start = field.weights_base as usize
-                        + self.get_weight_idx(concat_cell, 0, 0, hidden_z, 0);
-                    let weights_end = weights_start + self.dendrites;
-                    let weights_cell = &mut self.weights[weights_start..weights_end];
+                            let rel_weights_base =
+                                field.weights_base as usize - (hidden_col * col_weights_len);
+                            let weights_start = rel_weights_base
+                                + flat_index!(
+                                    [
+                                        self.hidden_size.cols,
+                                        self.visible_size.z,
+                                        self.area,
+                                        self.hidden_size.z,
+                                        self.dendrites
+                                    ],
+                                    [0, concat_cell, 0, hidden_z, 0]
+                                );
 
-                    for dendrite in 0..self.dendrites {
-                        weights_cell[dendrite] =
-                            weights_cell[dendrite].saturating_add(weight_deltas[dendrite]);
+                            let weights_end = weights_start + self.dendrites;
+                            let weights_cell = &mut col_weights[weights_start..weights_end];
+
+                            for dendrite in 0..self.dendrites {
+                                weights_cell[dendrite] =
+                                    weights_cell[dendrite].saturating_add(weight_deltas[dendrite]);
+                            }
+                        }
                     }
-                }
-            }
-        }
+                },
+            );
     }
 }
