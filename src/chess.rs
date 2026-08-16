@@ -1,10 +1,17 @@
+use std::{
+    io::{BufWriter, Write},
+    path::Path,
+};
+
 use crate::{
     coder::{CsdrSize, softmax},
-    decoder::{Decoder, DecoderLearningData},
-    encoder::Encoder,
+    decoder::{Decoder, DecoderLearningData, DecoderSnapshot},
+    encoder::{Encoder, EncoderSnapshot},
     pre_encoders::move_enc::MOVE_STRS,
-    sph::{LayerParams, Sph},
+    sph::{LayerParams, Sph, SphSnapshot},
 };
+use serde::{Deserialize, Serialize};
+use std::fs::File;
 
 #[derive(Debug)]
 pub struct PosAuxiliarDim;
@@ -24,6 +31,16 @@ pub struct ModelOutput {
     pub value: Box<[f32]>,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(bound(deserialize = "'de: 'a"))]
+struct ChessModelSnapshot<'a> {
+    policy: DecoderSnapshot<'a>,
+    value: DecoderSnapshot<'a>,
+    encoder: EncoderSnapshot<'a>,
+    body: SphSnapshot<'a>,
+    bottom_dendrites: usize,
+}
+
 #[derive(Debug)]
 pub struct ChessModel {
     body: Sph,
@@ -38,7 +55,7 @@ pub struct ChessModel {
     bottom_dendrites: usize,
 }
 
-impl ChessModel {
+impl<'a> ChessModel {
     pub const INPUT_SIZE: CsdrSize = CsdrSize::new(9, 8, 16);
     pub const POLICY_SIZE: CsdrSize = CsdrSize::new(1, 1, MOVE_STRS.len());
     pub const VALUE_SIZE: CsdrSize = CsdrSize::new(1, 1, 3); // WDL
@@ -170,5 +187,43 @@ impl ChessModel {
         self.prev_policy_data = None;
         self.prev_value_data = None;
         self.body.clean_learning_state();
+    }
+
+    fn get_snapshot(&'a self) -> ChessModelSnapshot<'a> {
+        ChessModelSnapshot {
+            policy: self.policy_head.get_snapshot(),
+            value: self.value_head.get_snapshot(),
+            encoder: self.bottom_encoder.get_snapshot(),
+            body: self.body.get_snapshot(),
+            bottom_dendrites: self.bottom_dendrites,
+        }
+    }
+
+    fn from_snapshot(snapshot: ChessModelSnapshot) -> Self {
+        Self {
+            body: Sph::from_snapshot(snapshot.body),
+            bottom_encoder: Encoder::from_snapshot(snapshot.encoder),
+            policy_head: Decoder::from_snapshot(snapshot.policy),
+            value_head: Decoder::from_snapshot(snapshot.value),
+            prev_policy_data: None,
+            prev_value_data: None,
+            bottom_dendrites: snapshot.bottom_dendrites,
+        }
+    }
+
+    pub fn save_to_file<P: AsRef<Path>>(&'a self, path: P) -> std::io::Result<()> {
+        let file = File::create(path)?;
+        let mut writer = BufWriter::new(file);
+        postcard::to_io(&self.get_snapshot(), &mut writer)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        writer.flush()?;
+        Ok(())
+    }
+
+    pub fn load_from_file<P: AsRef<Path>>(path: P) -> std::io::Result<Self> {
+        let bytes = std::fs::read(path)?;
+        let snapshot: ChessModelSnapshot = postcard::from_bytes(&bytes)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        Ok(ChessModel::from_snapshot(snapshot))
     }
 }

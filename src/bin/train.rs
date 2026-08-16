@@ -13,6 +13,8 @@ use sparse_chess::{
 };
 use std::{fs::File, io::BufReader};
 
+const SAVE_EACH: usize = 10;
+
 #[derive(Debug, Default)]
 struct ModelErrors {
     policy_correct_cnt: usize,
@@ -25,7 +27,7 @@ struct ModelErrors {
 struct TrainigState {
     position: Chess,
     model: ChessModel,
-    outcome: KnownOutcome,
+    outcome: u16,
     model_color: Color,
 }
 
@@ -52,8 +54,8 @@ impl TrainigState {
         legality_mask
     }
 
-    fn get_value_target(&self) -> u16 {
-        match self.outcome {
+    fn get_value_target(&self, known: KnownOutcome) -> u16 {
+        match known {
             KnownOutcome::Draw => 1,
             KnownOutcome::Decisive { winner } => {
                 if winner == self.model_color {
@@ -88,7 +90,6 @@ impl Visitor for TrainigState {
                 Ok(outcome @ Outcome::Known(_)) => *tags = outcome,
                 _ => return ControlFlow::Break(None),
             },
-            // b"Termination" => return ControlFlow::Break(None),
             _ => {}
         }
 
@@ -101,7 +102,7 @@ impl Visitor for TrainigState {
         };
 
         self.position = Chess::default();
-        self.outcome = known;
+        self.outcome = self.get_value_target(known);
         self.model_color = [Color::White, Color::Black][fastrand::usize(0..2)];
         self.model.clean_learning_state();
 
@@ -125,16 +126,12 @@ impl Visitor for TrainigState {
         }
 
         let legality_mask = self.get_legality_mask();
-        let position_csdr = encode_position(&self.position);
-
-        let value_target = self.get_value_target();
         let policy_target =
             encode_move(&m, self.model_color).expect("failed to expected encode move") as u16;
-
         let output = self.model.step(
-            &position_csdr,
+            &encode_position(&self.position),
             &legality_mask,
-            Some((&[policy_target], &[value_target])),
+            Some((&[policy_target], &[self.outcome])),
         );
 
         let target_move_activation = output.policy[policy_target as usize];
@@ -152,7 +149,7 @@ impl Visitor for TrainigState {
             predicted_move_idx, target_move_activation
         );
 
-        movetext.value_error_sum += 1.0 - output.value[value_target as usize];
+        movetext.value_error_sum += 1.0 - output.value[self.outcome as usize];
         movetext.policy_error_sum += 1.0 - target_move_activation;
         movetext.total_positions += 1;
         if predicted_move_idx == policy_target as usize {
@@ -168,16 +165,12 @@ impl Visitor for TrainigState {
     }
 }
 
-pub fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let file = File::open("games-3.5s.pgn")?;
-    let reader = BufReader::new(file);
-    let mut pgn_reader = Reader::new(reader);
-
-    let pipeline_size = [(9, 8, 32), (4, 4, 64)];
+fn default_model() -> ChessModel {
+    let pipeline_size = [(8, 8, 32), (4, 4, 64)];
 
     let default_params = LayerParams {
-        decoder_lr: 0.5,
-        encoder_lr: 0.1,
+        decoder_lr: 0.25,
+        encoder_lr: 0.025,
         radius: 2,
         learning_radius: 2,
         choice: 0.1,
@@ -189,29 +182,59 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let params = [default_params, default_params];
 
-    let model = ChessModel::new(&pipeline_size, &params);
+    ChessModel::new(&pipeline_size, &params)
+}
+
+pub fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("starting...");
+
+    let snapshot_path = "model.bin";
+    let file = File::open("games-3.5s.pgn")?;
+    let reader = BufReader::new(file);
+    let mut pgn_reader = Reader::new(reader);
 
     let mut state = TrainigState {
         position: Chess::default(),
-        model,
-        outcome: KnownOutcome::Draw,
+        model: {
+            println!("loading model snapshot...");
+            match ChessModel::load_from_file(snapshot_path) {
+                Ok(model) => model,
+                Err(err) => {
+                    eprintln!("error opening snapshot: {}", err);
+                    println!("using random initialization instead...");
+                    default_model()
+                }
+            }
+        },
+        outcome: 3, // Invalid value as placeholder
         model_color: Color::White,
     };
 
+    let mut game_cnt = 0;
     while let Some(Some(movetext)) = pgn_reader.read_game(&mut state)? {
+        game_cnt += 1;
+
         let total = movetext.total_positions as f32;
         let value_mae = movetext.value_error_sum / total;
         let policy_mae = movetext.policy_error_sum / total;
         let policy_accuracy = movetext.policy_correct_cnt as f32 / total;
 
         println!(
-            "[Game loss ({} evaluated positions)]: Value MAE: {:.2}, Policy MAE: {:.2}, Policy Accuracy: {:.2}%",
+            "{}. [Game loss ({} evaluated positions)]: Value MAE: {:.2}, Policy MAE: {:.2}, Policy Accuracy: {:.2}%",
+            game_cnt,
             movetext.total_positions,
             value_mae,
             policy_mae,
             policy_accuracy * 100.0
         );
+
+        if game_cnt % SAVE_EACH == 0 {
+            println!("saving snapshot...");
+            state.model.save_to_file(snapshot_path)?;
+        }
     }
+
+    println!("training finished...");
 
     Ok(())
 }

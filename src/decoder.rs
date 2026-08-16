@@ -1,4 +1,7 @@
+use std::borrow::Cow;
+
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     coder::{
@@ -20,6 +23,18 @@ pub struct DecoderLearningData {
     pub(crate) activations: Box<[f32]>,
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct DecoderSnapshot<'a> {
+    visible_size: CsdrSize,
+    hidden_size: CsdrSize,
+    half_dendrites: usize,
+    radius: i16,
+    scale: f32,
+    lr: f32,
+    #[serde(borrow)]
+    weights: Cow<'a, [i8]>,
+}
+
 #[derive(Debug)]
 pub struct Decoder {
     pub(crate) visible_size: CsdrSize,
@@ -33,7 +48,7 @@ pub struct Decoder {
     scale: f32,
 }
 
-impl Decoder {
+impl<'a> Decoder {
     pub fn new(
         visible_size: CsdrSize,
         hidden_size: CsdrSize,
@@ -374,5 +389,42 @@ impl Decoder {
                     }
                 },
             );
+    }
+
+    pub fn get_snapshot(&'a self) -> DecoderSnapshot<'a> {
+        DecoderSnapshot {
+            visible_size: self.visible_size.clone(),
+            hidden_size: self.hidden_size.clone(),
+            half_dendrites: self.half_dendrites,
+            radius: (self.area.isqrt() as i16 - 1) / 2,
+            scale: self.scale,
+            lr: self.lr,
+            weights: Cow::Borrowed(&self.weights),
+        }
+    }
+
+    pub fn from_snapshot(snapshot: DecoderSnapshot) -> Self {
+        let dendrites = snapshot.half_dendrites * 2;
+        let diameter = snapshot.radius * 2 + 1;
+        let area = (diameter * diameter) as usize;
+
+        let receptive_field = Decoder::init_receptive_field(
+            &snapshot.hidden_size,
+            &snapshot.visible_size,
+            dendrites,
+            snapshot.radius,
+        );
+
+        Self {
+            visible_size: snapshot.visible_size,
+            hidden_size: snapshot.hidden_size,
+            area,
+            receptive_field,
+            half_dendrites: snapshot.half_dendrites,
+            dendrites,
+            lr: snapshot.lr,
+            weights: snapshot.weights.into_owned().into_boxed_slice(),
+            scale: snapshot.scale,
+        }
     }
 }

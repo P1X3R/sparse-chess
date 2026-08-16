@@ -1,8 +1,17 @@
+use serde::{Deserialize, Serialize};
+
 use crate::{
     coder::CsdrSize,
-    decoder::{Decoder, DecoderLearningData},
-    encoder::Encoder,
+    decoder::{Decoder, DecoderLearningData, DecoderSnapshot},
+    encoder::{Encoder, EncoderSnapshot},
 };
+
+#[derive(Serialize, Deserialize)]
+#[serde(bound(deserialize = "'de: 'a"))]
+pub struct SphSnapshot<'a> {
+    layers: Vec<(EncoderSnapshot<'a>, DecoderSnapshot<'a>)>,
+    input_cols: usize,
+}
 
 #[derive(Debug, Default)]
 struct LayerState {
@@ -54,7 +63,7 @@ impl SphLayer {
     }
 }
 
-impl Sph {
+impl<'a> Sph {
     pub fn new(pipeline_sizes: &[(usize, usize, usize)], params: &[LayerParams]) -> Self {
         assert!(
             pipeline_sizes.len() > 1,
@@ -178,6 +187,30 @@ impl Sph {
     pub fn clean_learning_state(&mut self) {
         for layer in self.layers.iter_mut() {
             layer.state.prev_decoder_data = None;
+        }
+    }
+
+    pub fn get_snapshot(&'a self) -> SphSnapshot<'a> {
+        SphSnapshot {
+            layers: self
+                .layers
+                .iter()
+                .map(|l| (l.encoder.get_snapshot(), l.decoder.get_snapshot()))
+                .collect(),
+            input_cols: self.input_cols,
+        }
+    }
+
+    pub fn from_snapshot(snapshot: SphSnapshot) -> Self {
+        Sph {
+            layers: snapshot
+                .layers
+                .into_iter()
+                .map(|(enc, dec)| {
+                    SphLayer::new(Encoder::from_snapshot(enc), Decoder::from_snapshot(dec))
+                })
+                .collect(),
+            input_cols: snapshot.input_cols,
         }
     }
 }

@@ -1,3 +1,7 @@
+use std::borrow::Cow;
+
+use serde::{Deserialize, Serialize};
+
 use crate::{
     coder::{CsdrSize, FieldBounds, FieldEntry, ReceptiveField},
     flat_index,
@@ -7,6 +11,24 @@ type LocalField = ReceptiveField<FieldEntry>;
 type LearningField = ReceptiveField<u32>;
 
 const BYTE_INV: f32 = 1.0 / 255.0;
+
+#[derive(Serialize, Deserialize)]
+pub struct EncoderSnapshot<'a> {
+    visible_size: CsdrSize,
+    hidden_size: CsdrSize,
+    radius: i16,
+    learning_radius: isize,
+    #[serde(borrow)]
+    hidden_totals: Cow<'a, [u16]>,
+    #[serde(borrow)]
+    is_committed: Cow<'a, [bool]>,
+    choice: f32,
+    vigilance: f32,
+    active_ratio: f32,
+    lr: f32,
+    #[serde(borrow)]
+    weights: Cow<'a, [u8]>,
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct EncoderLearningData {
@@ -20,6 +42,7 @@ pub struct Encoder {
     pub(crate) visible_size: CsdrSize,
     pub(crate) hidden_size: CsdrSize,
     area: usize,
+    learning_radius: isize,
     receptive_field: LocalField,
     learning_field: LearningField,
     weight_deltas: [u8; 256],
@@ -28,10 +51,11 @@ pub struct Encoder {
     choice: f32,
     vigilance: f32,
     active_ratio: f32,
+    lr: f32,
     weights: Box<[u8]>,
 }
 
-impl Encoder {
+impl<'a> Encoder {
     pub fn new(
         visible_size: CsdrSize,
         hidden_size: CsdrSize,
@@ -53,6 +77,7 @@ impl Encoder {
             visible_size,
             hidden_size,
             area,
+            learning_radius,
             receptive_field,
             learning_field,
             weight_deltas: std::array::from_fn(|w| {
@@ -63,10 +88,15 @@ impl Encoder {
             choice,
             vigilance,
             active_ratio,
+            lr,
             weights: std::iter::repeat_with(|| rng.u8(0..=8))
                 .take(visible_size.z * hidden_size.cols * area * hidden_size.z)
                 .collect(),
         }
+    }
+
+    fn compute_deltas(lr: f32) -> [u8; 256] {
+        std::array::from_fn(|w| (w as u8).saturating_add((lr * (255.0 - w as f32)).ceil() as u8))
     }
 
     fn init_learning_field_lut(hidden_size: &CsdrSize, learning_radius: isize) -> LearningField {
@@ -342,6 +372,50 @@ impl Encoder {
             }
 
             self.is_committed[hidden_idx] = true;
+        }
+    }
+
+    pub fn get_snapshot(&'a self) -> EncoderSnapshot<'a> {
+        EncoderSnapshot {
+            visible_size: self.visible_size,
+            hidden_size: self.hidden_size,
+            radius: (self.area.isqrt() as i16 - 1) / 2,
+            learning_radius: self.learning_radius,
+            hidden_totals: Cow::Borrowed(&self.hidden_totals),
+            is_committed: Cow::Borrowed(&self.is_committed),
+            choice: self.choice,
+            vigilance: self.vigilance,
+            active_ratio: self.active_ratio,
+            lr: self.lr,
+            weights: Cow::Borrowed(&self.weights),
+        }
+    }
+
+    pub fn from_snapshot(snapshot: EncoderSnapshot) -> Self {
+        let diameter = (snapshot.radius * 2) + 1;
+
+        Self {
+            visible_size: snapshot.visible_size,
+            hidden_size: snapshot.hidden_size,
+            area: (diameter * diameter) as usize,
+            learning_radius: snapshot.learning_radius,
+            receptive_field: Encoder::init_local_field_lut(
+                &snapshot.hidden_size,
+                &snapshot.visible_size,
+                snapshot.radius,
+            ),
+            learning_field: Encoder::init_learning_field_lut(
+                &snapshot.hidden_size,
+                snapshot.learning_radius,
+            ),
+            weight_deltas: Encoder::compute_deltas(snapshot.lr),
+            hidden_totals: snapshot.hidden_totals.into_owned().into_boxed_slice(),
+            is_committed: snapshot.is_committed.into_owned().into_boxed_slice(),
+            choice: snapshot.choice,
+            vigilance: snapshot.vigilance,
+            active_ratio: snapshot.active_ratio,
+            lr: snapshot.lr,
+            weights: snapshot.weights.into_owned().into_boxed_slice(),
         }
     }
 }

@@ -1,4 +1,6 @@
-#[derive(Debug, Copy, Clone)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
 pub struct CsdrSize {
     pub x: usize,
     pub y: usize,
