@@ -171,6 +171,7 @@ static MOVE_TO_INDEX: LazyLock<HashMap<u16, usize>> = LazyLock::new(|| {
         .collect()
 });
 
+#[inline]
 fn char_to_promo(c: char) -> u16 {
     match c {
         'q' => 1,
@@ -180,6 +181,7 @@ fn char_to_promo(c: char) -> u16 {
     }
 }
 
+#[inline]
 fn uci_to_packed_int(uci: &str) -> u16 {
     assert!(uci.len() >= 4);
 
@@ -219,6 +221,7 @@ pub fn encode_move(m: &Move, turn: Color) -> Option<usize> {
     MOVE_TO_INDEX.get(&uci_to_packed_int(&uci_str)).copied()
 }
 
+#[inline]
 fn flip_uci_string(uci: &str) -> String {
     let mut chars: Vec<char> = uci.chars().collect();
     chars[1] = flip_rank_char(chars[1]);
@@ -226,6 +229,7 @@ fn flip_uci_string(uci: &str) -> String {
     chars.into_iter().collect()
 }
 
+#[inline]
 fn flip_rank_char(c: char) -> char {
     let one = '1' as u8;
     let rank = (c as u8) - one;
