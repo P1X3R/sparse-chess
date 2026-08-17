@@ -49,9 +49,6 @@ pub struct ChessModel {
     policy_head: Decoder,
     value_head: Decoder,
 
-    prev_policy_data: Option<DecoderLearningData>,
-    prev_value_data: Option<DecoderLearningData>,
-
     bottom_dendrites: usize,
 }
 
@@ -101,9 +98,6 @@ impl<'a> ChessModel {
                 bottom_params.decoder_lr,
             ),
 
-            prev_policy_data: None,
-            prev_value_data: None,
-
             bottom_dendrites: bottom_params.half_dendrites * 2,
         }
     }
@@ -150,8 +144,7 @@ impl<'a> ChessModel {
         legality_mask: &[bool],
         expected: Option<(&[u16], &[u16])>,
     ) -> ModelOutput {
-        let learn =
-            expected.is_some() && self.prev_policy_data.is_some() && self.prev_value_data.is_some();
+        let learn = expected.is_some();
 
         let (hidden, enc_data) = self.bottom_encoder.forward(input);
         if learn {
@@ -164,28 +157,19 @@ impl<'a> ChessModel {
         concat.extend_from_slice(&hidden);
         concat.extend_from_slice(&feedback);
 
-        if let Some((policy_target, value_target)) = expected {
-            if let Some(prev_data) = self.prev_policy_data.take() {
-                self.policy_head.learn(policy_target, &prev_data);
-            }
-            if let Some(prev_data) = self.prev_value_data.take() {
-                self.value_head.learn(value_target, &prev_data);
-            }
-        }
-
         let (policy, policy_data) = self.step_policy(&concat, legality_mask);
         let (_, value_data) = self.value_head.forward(&concat);
         let value = value_data.activations.clone();
 
-        self.prev_policy_data = Some(policy_data);
-        self.prev_value_data = Some(value_data);
+        if let Some((policy_target, value_target)) = expected {
+            self.policy_head.learn(policy_target, &policy_data);
+            self.value_head.learn(value_target, &value_data);
+        }
 
         ModelOutput { policy, value }
     }
 
     pub fn clean_learning_state(&mut self) {
-        self.prev_policy_data = None;
-        self.prev_value_data = None;
         self.body.clean_learning_state();
     }
 
@@ -205,8 +189,6 @@ impl<'a> ChessModel {
             bottom_encoder: Encoder::from_snapshot(snapshot.encoder),
             policy_head: Decoder::from_snapshot(snapshot.policy),
             value_head: Decoder::from_snapshot(snapshot.value),
-            prev_policy_data: None,
-            prev_value_data: None,
             bottom_dendrites: snapshot.bottom_dendrites,
         }
     }
