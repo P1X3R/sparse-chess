@@ -3,6 +3,7 @@ use std::{ops::ControlFlow, str::FromStr};
 use pgn_reader::Reader;
 use pgn_reader::{SanPlus, Visitor};
 use shakmaty::{Chess, Color, KnownOutcome, Outcome, Position};
+use sparse_chess::chess::BottomLayerParams;
 use sparse_chess::sph::LayerParams;
 use sparse_chess::{
     chess::ChessModel,
@@ -50,7 +51,7 @@ impl TrainingState {
 
             legality_mask[encoded_legal_move] = true;
 
-            assert_eq!(
+            debug_assert_eq!(
                 decode_move_idx(encoded_legal_move, &self.position).expect(&format!(
                     "failed to decode legal move {}/{}",
                     lm, encoded_legal_move
@@ -111,7 +112,7 @@ impl Visitor for TrainingState {
 
         self.position = Chess::default();
         self.known_outcome = known;
-        self.model.clean_learning_state();
+        self.model.body.clean_learning_state();
 
         ControlFlow::Continue(ModelErrors::default())
     }
@@ -281,7 +282,7 @@ fn evaluate_validation_set(model: &mut ChessModel, val_set: &[ValidationPosition
     let mut errors = ModelErrors::default();
 
     // Clear learning state before running validation inference pass
-    model.clean_learning_state();
+    model.body.clean_learning_state();
 
     for pos in val_set {
         // Passing target = None ensures model weights are NOT updated
@@ -305,25 +306,29 @@ fn evaluate_validation_set(model: &mut ChessModel, val_set: &[ValidationPosition
     }
 
     // Clean state again after evaluation to leave model fresh for next training game
-    model.clean_learning_state();
+    model.body.clean_learning_state();
     errors
 }
 
 fn default_model() -> ChessModel {
     let pipeline_size = [(8, 8, 16), (4, 4, 24), (2, 2, 36)];
 
+    let bottom_params = BottomLayerParams {
+        encoder_lr: 0.1,
+        radius: 2,
+        learning_radius: 2,
+        choice: 0.01,
+        vigilance: 0.9,
+        active_ratio: 0.1,
+        policy_lr: 0.02,
+        policy_half_dendrites: 2,
+        policy_scale: 8.0,
+        value_lr: 0.02,
+        value_half_dendrites: 2,
+        value_scale: 8.0,
+    };
+
     let params = [
-        LayerParams {
-            decoder_lr: 0.02,
-            encoder_lr: 0.1,
-            radius: 2,
-            learning_radius: 2,
-            choice: 0.01,
-            vigilance: 0.9,
-            active_ratio: 0.1,
-            half_dendrites: 4,
-            decoder_scale: 10.0,
-        },
         LayerParams {
             decoder_lr: 0.02,
             encoder_lr: 0.1,
@@ -348,7 +353,7 @@ fn default_model() -> ChessModel {
         },
     ];
 
-    ChessModel::new(&pipeline_size, &params)
+    ChessModel::new(&pipeline_size, &params, &bottom_params)
 }
 
 pub fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -394,30 +399,17 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. Main Training Loop
     let mut game_cnt = 0;
-    while let Some(Some(movetext)) = pgn_reader.read_game(&mut state)? {
+    while let Some(Some(_)) = pgn_reader.read_game(&mut state)? {
         game_cnt += 1;
-
-        let total = movetext.total_positions as f32;
-        let value_cce = movetext.value_error_sum / total;
-        let policy_cce = movetext.policy_error_sum / total;
-        let policy_accuracy = movetext.policy_correct_cnt as f32 / total;
-
-        println!(
-            "{}. [Train Game ({} pos)]: Value CCE: {:.2}, Policy CCE: {:.2}, Top-1 Acc: {:.2}%",
-            game_cnt,
-            movetext.total_positions,
-            value_cce,
-            policy_cce,
-            policy_accuracy * 100.0
-        );
 
         // Run validation check periodically
         if game_cnt % EVAL_EACH == 0 && !validation_set.is_empty() {
             let val_metrics = evaluate_validation_set(&mut state.model, &validation_set);
             let val_total = val_metrics.total_positions as f32;
             println!(
-                "   ==> [VALIDATION ({} pos)]: Value CCE: {:.2}, Policy CCE: {:.2}, Top-1 Acc: {:.2}%",
+                "   ==> [VALIDATION ({} pos, {} trained games)]: Value CCE: {:.2}, Policy CCE: {:.2}, Top-1 Acc: {:.2}%",
                 val_metrics.total_positions,
+                game_cnt,
                 val_metrics.value_error_sum / val_total,
                 val_metrics.policy_error_sum / val_total,
                 (val_metrics.policy_correct_cnt as f32 / val_total) * 100.0
