@@ -1,428 +1,243 @@
-use std::{ops::ControlFlow, str::FromStr};
+use std::{fs::File, io::Read};
 
-use pgn_reader::Reader;
-use pgn_reader::{SanPlus, Visitor};
-use shakmaty::{Chess, Color, KnownOutcome, Outcome, Position};
-use sparse_chess::chess::BottomLayerParams;
-use sparse_chess::sph::LayerParams;
+use flate2::read::GzDecoder;
 use sparse_chess::{
-    chess::ChessModel,
-    pre_encoders::{
-        move_enc::{MOVE_STRS, decode_move_idx, encode_move},
-        position_enc::encode_position,
-    },
+    chess::{BottomLayerParams, ChessModel, PosAuxiliarDim},
+    coder::column_wise_one_hot,
+    flat_index,
+    sph::LayerParams,
 };
-use std::{fs::File, io::BufReader};
+use zerocopy::FromBytes;
+use zerocopy_derive::*;
 
-const SAVE_EACH: usize = 25;
-const EVAL_EACH: usize = 50;
+const BODY_LEN: usize = 2;
 
-#[derive(Debug, Default, Clone)]
-struct ModelErrors {
-    policy_correct_cnt: usize,
-    policy_error_sum: f32,
-    value_error_sum: f32,
-    total_positions: usize,
-}
+const BOTTOM_PARAMS: BottomLayerParams = BottomLayerParams {
+    encoder_lr: 0.2,
+    radius: 2,
+    learning_radius: 2,
+    choice: 0.01,
+    vigilance: 0.9,
+    active_ratio: 0.1,
+    policy_lr: 0.02,
+    policy_half_dendrites: 2,
+    policy_scale: 8.0,
+    value_lr: 0.02,
+    value_half_dendrites: 2,
+    value_scale: 8.0,
+};
 
-#[derive(Clone)]
-struct ValidationPosition {
-    encoded_pos: Vec<u16>,
-    legality_mask: [bool; MOVE_STRS.len()],
-    policy_target: u16,
-    value_target: u16,
-}
-
-#[derive(Debug)]
-struct TrainingState {
-    position: Chess,
-    model: ChessModel,
-    known_outcome: KnownOutcome,
-}
-
-impl TrainingState {
-    fn get_legality_mask(&self, active_color: Color) -> [bool; MOVE_STRS.len()] {
-        let mut legality_mask = [false; MOVE_STRS.len()];
-
-        for lm in self.position.legal_moves() {
-            let Some(encoded_legal_move) = encode_move(&lm, active_color) else {
-                panic!("failed to encode legal move {}", lm)
-            };
-
-            legality_mask[encoded_legal_move] = true;
-
-            debug_assert_eq!(
-                decode_move_idx(encoded_legal_move, &self.position).expect(&format!(
-                    "failed to decode legal move {}/{}",
-                    lm, encoded_legal_move
-                )),
-                lm
-            );
-        }
-
-        legality_mask
-    }
-
-    fn get_value_target(&self, active_color: Color) -> u16 {
-        match self.known_outcome {
-            KnownOutcome::Draw => 1,
-            KnownOutcome::Decisive { winner } => {
-                if winner == active_color {
-                    0
-                } else {
-                    2
-                }
-            }
-        }
-    }
-}
-
-impl Visitor for TrainingState {
-    type Tags = Outcome;
-    type Movetext = ModelErrors;
-    type Output = Option<ModelErrors>;
-
-    fn begin_tags(&mut self) -> ControlFlow<Self::Output, Self::Tags> {
-        ControlFlow::Continue(Outcome::Unknown)
-    }
-
-    fn tag(
-        &mut self,
-        tags: &mut Self::Tags,
-        name: &[u8],
-        value: pgn_reader::RawTag<'_>,
-    ) -> ControlFlow<Self::Output> {
-        let val = value.decode_utf8().expect("error decoding tag value");
-
-        match name {
-            b"Result" => match Outcome::from_str(&val) {
-                Ok(outcome @ Outcome::Known(_)) => *tags = outcome,
-                _ => return ControlFlow::Break(None),
-            },
-            _ => {}
-        }
-
-        ControlFlow::Continue(())
-    }
-
-    fn begin_movetext(&mut self, tags: Self::Tags) -> ControlFlow<Self::Output, Self::Movetext> {
-        let Outcome::Known(known) = tags else {
-            return ControlFlow::Break(None);
-        };
-
-        self.position = Chess::default();
-        self.known_outcome = known;
-        self.model.body.clean_learning_state();
-
-        ControlFlow::Continue(ModelErrors::default())
-    }
-
-    fn san(
-        &mut self,
-        movetext: &mut Self::Movetext,
-        san_plus: SanPlus,
-    ) -> ControlFlow<Self::Output> {
-        if self.position.is_game_over() {
-            return ControlFlow::Continue(());
-        }
-
-        let current_color = self.position.turn();
-        let m = san_plus.san.to_move(&self.position).expect("legal move");
-
-        let legality_mask = self.get_legality_mask(current_color);
-        let policy_target =
-            encode_move(&m, current_color).expect("failed to expected encode move") as u16;
-        let value_target = self.get_value_target(current_color);
-
-        // Train step with targets provided
-        let output = self.model.step(
-            &encode_position(&self.position),
-            &legality_mask,
-            Some((&[policy_target], &[value_target])),
-        );
-
-        let target_move_activation = output.policy[policy_target as usize];
-        let (predicted_move_idx, _) = output
-            .policy
-            .iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| a.total_cmp(b))
-            .unwrap();
-
-        assert_ne!(target_move_activation, 0.0);
-        assert!(
-            legality_mask[predicted_move_idx],
-            "illegal prediction: {}, activation: {}",
-            predicted_move_idx, target_move_activation
-        );
-
-        movetext.value_error_sum += -output.value[value_target as usize].ln();
-        movetext.policy_error_sum += -target_move_activation.ln();
-        movetext.total_positions += 1;
-        if predicted_move_idx == policy_target as usize {
-            movetext.policy_correct_cnt += 1;
-        }
-
-        self.position.play_unchecked(m);
-        ControlFlow::Continue(())
-    }
-
-    fn end_game(&mut self, movetext: Self::Movetext) -> Self::Output {
-        Some(movetext)
-    }
-}
-
-/// Visitor specifically for collecting static validation data prior to training.
-struct ValidationCollector {
-    position: Chess,
-    known_outcome: KnownOutcome,
-    collected: Vec<ValidationPosition>,
-    max_positions: usize,
-}
-
-impl ValidationCollector {
-    fn new(max_positions: usize) -> Self {
-        Self {
-            position: Chess::default(),
-            known_outcome: KnownOutcome::Draw,
-            collected: Vec::with_capacity(max_positions),
-            max_positions,
-        }
-    }
-}
-
-impl Visitor for ValidationCollector {
-    type Tags = Outcome;
-    type Movetext = ();
-    type Output = Option<()>;
-
-    fn begin_tags(&mut self) -> ControlFlow<Self::Output, Self::Tags> {
-        if self.collected.len() >= self.max_positions {
-            ControlFlow::Break(None)
-        } else {
-            ControlFlow::Continue(Outcome::Unknown)
-        }
-    }
-
-    fn tag(
-        &mut self,
-        tags: &mut Self::Tags,
-        name: &[u8],
-        value: pgn_reader::RawTag<'_>,
-    ) -> ControlFlow<Self::Output> {
-        let val = value.decode_utf8().expect("error decoding tag value");
-        if name == b"Result" {
-            if let Ok(outcome @ Outcome::Known(_)) = Outcome::from_str(&val) {
-                *tags = outcome;
-            } else {
-                return ControlFlow::Break(None);
-            }
-        }
-        ControlFlow::Continue(())
-    }
-
-    fn begin_movetext(&mut self, tags: Self::Tags) -> ControlFlow<Self::Output, Self::Movetext> {
-        let Outcome::Known(known) = tags else {
-            return ControlFlow::Break(None);
-        };
-        self.position = Chess::default();
-        self.known_outcome = known;
-        ControlFlow::Continue(())
-    }
-
-    fn san(
-        &mut self,
-        _movetext: &mut Self::Movetext,
-        san_plus: SanPlus,
-    ) -> ControlFlow<Self::Output> {
-        if self.collected.len() >= self.max_positions || self.position.is_game_over() {
-            return ControlFlow::Break(None);
-        }
-
-        let current_color = self.position.turn();
-        let m = san_plus.san.to_move(&self.position).expect("legal move");
-
-        let mut legality_mask = [false; MOVE_STRS.len()];
-        for lm in self.position.legal_moves() {
-            if let Some(encoded_legal_move) = encode_move(&lm, current_color) {
-                legality_mask[encoded_legal_move] = true;
-            }
-        }
-
-        let policy_target = encode_move(&m, current_color).unwrap() as u16;
-        let value_target = match self.known_outcome {
-            KnownOutcome::Draw => 1,
-            KnownOutcome::Decisive { winner } => {
-                if winner == current_color {
-                    0
-                } else {
-                    2
-                }
-            }
-        };
-
-        self.collected.push(ValidationPosition {
-            encoded_pos: encode_position(&self.position).to_vec(),
-            legality_mask,
-            policy_target,
-            value_target,
-        });
-
-        self.position.play_unchecked(m);
-        ControlFlow::Continue(())
-    }
-
-    fn end_game(&mut self, _movetext: Self::Movetext) -> Self::Output {
-        Some(())
-    }
-}
-
-/// Evaluates the model on the static validation set without passing targets (no weight updates).
-fn evaluate_validation_set(model: &mut ChessModel, val_set: &[ValidationPosition]) -> ModelErrors {
-    let mut errors = ModelErrors::default();
-
-    // Clear learning state before running validation inference pass
-    model.body.clean_learning_state();
-
-    for pos in val_set {
-        // Passing target = None ensures model weights are NOT updated
-        let output = model.step(&pos.encoded_pos, &pos.legality_mask, None);
-
-        let target_move_activation = output.policy[pos.policy_target as usize].max(1e-7);
-        let (predicted_move_idx, _) = output
-            .policy
-            .iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| a.total_cmp(b))
-            .unwrap();
-
-        errors.value_error_sum += -output.value[pos.value_target as usize].max(1e-7).ln();
-        errors.policy_error_sum += -target_move_activation.ln();
-        errors.total_positions += 1;
-
-        if predicted_move_idx == pos.policy_target as usize {
-            errors.policy_correct_cnt += 1;
-        }
-    }
-
-    // Clean state again after evaluation to leave model fresh for next training game
-    model.body.clean_learning_state();
-    errors
-}
-
-fn default_model() -> ChessModel {
-    let pipeline_size = [(8, 8, 16), (4, 4, 24), (2, 2, 36)];
-
-    let bottom_params = BottomLayerParams {
+const PARAMS: [LayerParams; BODY_LEN] = [
+    LayerParams {
+        decoder_lr: 0.01,
         encoder_lr: 0.1,
-        radius: 2,
-        learning_radius: 2,
+        radius: 1,
+        learning_radius: 1,
         choice: 0.01,
         vigilance: 0.9,
         active_ratio: 0.1,
-        policy_lr: 0.02,
-        policy_half_dendrites: 2,
-        policy_scale: 8.0,
-        value_lr: 0.02,
-        value_half_dendrites: 2,
-        value_scale: 8.0,
-    };
+        half_dendrites: 4,
+        decoder_scale: 8.0,
+    },
+    LayerParams {
+        decoder_lr: 0.01,
+        encoder_lr: 0.1,
+        radius: 1,
+        learning_radius: 1,
+        choice: 0.01,
+        vigilance: 0.9,
+        active_ratio: 0.1,
+        half_dendrites: 6,
+        decoder_scale: 8.0,
+    },
+];
 
-    let params = [
-        LayerParams {
-            decoder_lr: 0.02,
-            encoder_lr: 0.1,
-            radius: 2,
-            learning_radius: 2,
-            choice: 0.01,
-            vigilance: 0.75,
-            active_ratio: 0.1,
-            half_dendrites: 4,
-            decoder_scale: 8.0,
-        },
-        LayerParams {
-            decoder_lr: 0.01,
-            encoder_lr: 0.05,
-            radius: 1,
-            learning_radius: 1,
-            choice: 0.1,
-            vigilance: 0.5,
-            active_ratio: 0.1,
-            half_dendrites: 8,
-            decoder_scale: 8.0,
-        },
-    ];
+const PIPELINE_SIZES: [(usize, usize, usize); BODY_LEN + 1] = [(8, 8, 12), (4, 4, 18), (2, 2, 27)];
 
-    ChessModel::new(&pipeline_size, &params, &bottom_params)
+#[repr(C, packed)]
+#[derive(FromBytes, Immutable, KnownLayout, Debug, Clone, Copy)]
+pub struct TrainingData {
+    pub version: u32,
+    pub input_format: u32,
+    pub probabilities: [f32; 1858],
+    pub planes: [u64; 104],
+    pub castling_us_ooo: u8,
+    pub castling_us_oo: u8,
+    pub castling_them_ooo: u8,
+    pub castling_them_oo: u8,
+    pub side_to_move_or_enpassant: u8,
+    pub rule50_count: u8,
+    pub invariance_info: u8,
+    pub dummy: u8,
+    pub root_q: f32,
+    pub best_q: f32,
+    pub root_d: f32,
+    pub best_d: f32,
+    pub root_m: f32,
+    pub best_m: f32,
+    pub plies_left: f32,
+    pub result_q: f32,
+    pub result_d: f32,
+    pub played_q: f32,
+    pub played_d: f32,
+    pub played_m: f32,
+    pub orig_q: f32,
+    pub orig_d: f32,
+    pub orig_m: f32,
+    pub visits: u32,
+    pub played_idx: u16,
+    pub best_idx: u16,
+    pub policy_kld: f32,
+    pub q_st: f32,
 }
 
-pub fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("starting...");
+impl TrainingData {
+    const BYTES: usize = core::mem::size_of::<TrainingData>();
 
-    // 1. Load validation benchmark dataset (1,000 positions)
-    println!("loading validation set...");
-    let val_file = File::open("val-games.pgn").or_else(|_| File::open("games-3.5s.pgn"))?;
-    let mut val_collector = ValidationCollector::new(1000);
-    let mut val_reader = Reader::new(BufReader::new(val_file));
-    while let Ok(Some(_)) = val_reader.read_game(&mut val_collector) {
-        if val_collector.collected.len() >= 1000 {
-            break;
+    #[inline]
+    pub fn get_win(&self) -> f32 {
+        (1.0 + self.root_q - self.root_d) * 0.5
+    }
+
+    #[inline]
+    pub fn get_lose(&self) -> f32 {
+        (1.0 - self.root_q - self.root_d) * 0.5
+    }
+
+    #[inline]
+    pub fn get_wdl(&self) -> [f32; 3] {
+        [
+            self.get_win(),
+            self.root_d, // Draw
+            self.get_lose(),
+        ]
+    }
+}
+
+const _: () = assert!(TrainingData::BYTES == 8356);
+
+pub fn load_records_from_bytes(bytes: &[u8]) -> &[TrainingData] {
+    let (records, _remainder) =
+        <[TrainingData]>::ref_from_prefix(bytes).expect("Byte stream alignment or size issue");
+
+    records
+}
+
+pub fn read_chunk_file(path: &str) -> std::io::Result<Vec<u8>> {
+    let file = File::open(path)?;
+    let mut buffer = Vec::new();
+
+    let mut decoder = GzDecoder::new(file);
+    decoder.read_to_end(&mut buffer)?;
+
+    Ok(buffer)
+}
+
+fn lc0_to_csdr(data: &TrainingData) -> Vec<u16> {
+    let mut out = vec![0; ChessModel::INPUT_SIZE.cols];
+
+    // Lc0 stores 8 history states, 13 planes each (12 pieces + 1 repetition).
+    // The current position is at t=0, so we only need planes 0..11.
+    // Map Lc0 plane indices to your `piece_cell` format: ((is_us * 6) + role)
+    // Us: P=7, N=8, B=9, R=10, Q=11, K=12
+    // Them: P=1, N=2, B=3, R=4, Q=5, K=6
+    const PLANE_TO_CELL: [u16; 12] = [7, 8, 9, 10, 11, 12, 1, 2, 3, 4, 5, 6];
+
+    // 1. Map piece bitboards to the 8x8 grid
+    for sq in 0..64 {
+        let bit = 1u64 << sq;
+
+        // Since Lc0's planes are already canonically transformed,
+        // we map the bit directly to the coordinates.
+        let rank = sq / 8;
+        let file = sq % 8;
+
+        for (p, &piece_cell) in PLANE_TO_CELL.iter().enumerate() {
+            if (data.planes[p] & bit) != 0 {
+                let piece_col = flat_index!(
+                    [ChessModel::INPUT_SIZE.x, ChessModel::INPUT_SIZE.y],
+                    [rank, file]
+                );
+                out[piece_col] = piece_cell;
+                break; // A square can only have one piece
+            }
         }
     }
-    let validation_set = val_collector.collected;
-    println!(
-        "validation set ready with {} positions",
-        validation_set.len()
+
+    // 2. Map Auxiliary Metadata
+    let meta_base = flat_index!(
+        [ChessModel::INPUT_SIZE.x, ChessModel::INPUT_SIZE.y],
+        [PosAuxiliarDim::AUXILIAR_X, 0]
     );
+    let meta = &mut out[meta_base..(meta_base + ChessModel::INPUT_SIZE.y)];
 
-    // 2. Setup training state and load model
-    let snapshot_path = "model.bin";
-    let train_file = File::open("games-3.5s.pgn")?;
-    let reader = BufReader::new(train_file);
-    let mut pgn_reader = Reader::new(reader);
+    // Turn: Stored in bit 7 of invariance_info for input type 3
+    let turn = (data.invariance_info >> 7) & 1;
 
-    let mut state = TrainingState {
-        position: Chess::default(),
-        model: {
-            println!("loading model snapshot...");
-            match ChessModel::load_from_file(snapshot_path) {
-                Ok(model) => model,
-                Err(err) => {
-                    eprintln!("error opening snapshot: {}", err);
-                    println!("using random initialization instead...");
-                    default_model()
-                }
-            }
-        },
-        known_outcome: KnownOutcome::Draw,
+    // Castling rights (1 or 0 in V6 byte fields)
+    let friendly_castle_ks = (data.castling_us_oo != 0) as u16;
+    let friendly_castle_qs = (data.castling_us_ooo != 0) as u16;
+    let enemy_castle_ks = (data.castling_them_oo != 0) as u16;
+    let enemy_castle_qs = (data.castling_them_ooo != 0) as u16;
+
+    // EP File: side_to_move_or_enpassant acts as a column mask
+    // We mask out bit 7 just in case it leaks side-to-move info
+    let ep_mask = data.side_to_move_or_enpassant & 0x7F;
+    let ep_file = if ep_mask != 0 {
+        (ep_mask.trailing_zeros() + 1) as u16
+    } else {
+        0
     };
 
-    // 3. Main Training Loop
-    let mut game_cnt = 0;
-    while let Some(Some(_)) = pgn_reader.read_game(&mut state)? {
-        game_cnt += 1;
+    meta[PosAuxiliarDim::TURN_Y] = turn as u16;
+    meta[PosAuxiliarDim::FRIENDLY_RIGHTS_Y] = (friendly_castle_qs << 1) | friendly_castle_ks;
+    meta[PosAuxiliarDim::ENEMY_RIGHTS_Y] = (enemy_castle_qs << 1) | enemy_castle_ks;
+    meta[PosAuxiliarDim::EP_FILE_Y] = ep_file;
+    meta[PosAuxiliarDim::HM_CLOCK_Y] =
+        (data.rule50_count as usize * ChessModel::INPUT_SIZE.z / 150) as u16;
 
-        // Run validation check periodically
-        if game_cnt % EVAL_EACH == 0 && !validation_set.is_empty() {
-            let val_metrics = evaluate_validation_set(&mut state.model, &validation_set);
-            let val_total = val_metrics.total_positions as f32;
-            println!(
-                "   ==> [VALIDATION ({} pos, {} trained games)]: Value CCE: {:.2}, Policy CCE: {:.2}, Top-1 Acc: {:.2}%",
-                val_metrics.total_positions,
-                game_cnt,
-                val_metrics.value_error_sum / val_total,
-                val_metrics.policy_error_sum / val_total,
-                (val_metrics.policy_correct_cnt as f32 / val_total) * 100.0
-            );
-        }
+    out
+}
 
-        if game_cnt % SAVE_EACH == 0 {
-            println!("saving snapshot...");
-            state.model.save_to_file(snapshot_path)?;
+fn main() -> std::io::Result<()> {
+    let chunk_path = "training-run1--20210605-0516/training.221043087.gz";
+    let model_path = "model.bin";
+
+    let bytes = read_chunk_file(chunk_path)?;
+    let game = load_records_from_bytes(&bytes);
+    let mut model = match ChessModel::load_from_file(model_path) {
+        Ok(model) => model,
+        Err(err) => {
+            println!("error loading model file: {}", err);
+            println!("initializing new model instead");
+
+            ChessModel::new(&PIPELINE_SIZES, &PARAMS, &BOTTOM_PARAMS)
         }
+    };
+
+    let mut policy_cce = 0.0;
+    let mut value_loss = 0.0;
+
+    for training_pos in game {
+        let target_value = training_pos.get_wdl();
+        let target_policy = training_pos
+            .probabilities
+            .map(|p| if p == -1.0 { 0.0 } else { p });
+        let target_value_idx = column_wise_one_hot(&target_value) as usize;
+        let encoded = lc0_to_csdr(training_pos);
+        let legality_mask: [bool; 1858] = training_pos.probabilities.map(|p| p != -1.0);
+        let output = model.step(&encoded, &legality_mask, None);
+
+        policy_cce += -output.policy[training_pos.played_idx as usize].ln();
+        value_loss += -output.value[target_value_idx].ln();
     }
 
-    println!("training finished...");
+    let num_pos = game.len() as f32;
+    println!(
+        "Policy CCE: {:.2}, Value CCE: {:.2}",
+        policy_cce / num_pos,
+        value_loss / num_pos
+    );
 
     Ok(())
 }

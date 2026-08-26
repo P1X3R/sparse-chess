@@ -137,7 +137,7 @@ pub(crate) fn rand_round(x: f32) -> f32 {
 }
 
 #[inline]
-pub(crate) fn column_wise_one_hot(col: &[f32]) -> u16 {
+pub fn column_wise_one_hot(col: &[f32]) -> u16 {
     let (max_cell, _) = col
         .iter()
         .enumerate()
