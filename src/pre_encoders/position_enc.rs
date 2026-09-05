@@ -186,7 +186,6 @@ pub fn encode_position(pos: &Chess) -> Vec<u16> {
         })
         .unwrap_or(0);
 
-    meta[PosAuxiliarDim::TURN_Y] = turn as u16;
     meta[PosAuxiliarDim::FRIENDLY_RIGHTS_Y] = (friendly_castle_qs << 1) | friendly_castle_ks;
     meta[PosAuxiliarDim::ENEMY_RIGHTS_Y] = (enemy_castle_qs << 1) | enemy_castle_ks;
     meta[PosAuxiliarDim::EP_FILE_Y] = ep_file;
