@@ -310,20 +310,37 @@ impl<'a> Decoder {
         rand_round(delta) as i8
     }
 
-    pub fn learn(
-        &mut self,
-        expected: &[u16], // Must be at current time step
-        DecoderLearningData {
-            concat,
-            dendrite_activations,
-            activations,
-        }: &DecoderLearningData, // Must be at previous time step
-    ) {
+    pub fn learn_flat(&mut self, expected: &[f32], data: &DecoderLearningData) {
+        assert_eq!(expected.len(), data.activations.len());
+
+        let expected_chunks = expected.par_chunks(self.hidden_size.z);
+        self.learn_core(data, expected_chunks, |exp_chunk, hidden_z| {
+            exp_chunk[hidden_z]
+        });
+    }
+
+    pub fn learn(&mut self, expected: &[u16], data: &DecoderLearningData) {
         assert_eq!(expected.len(), self.hidden_size.cols);
-        assert_eq!(concat.len(), self.visible_size.cols);
-        assert_eq!(activations.len(), self.hidden_size.flat);
+
+        let expected_items = expected.par_iter();
+        self.learn_core(data, expected_items, |&exp_z, hidden_z| {
+            f32::from(hidden_z == exp_z as usize)
+        });
+    }
+
+    fn learn_core<T, F>(
+        &mut self,
+        data: &'a DecoderLearningData,
+        expected_iter: impl IndexedParallelIterator<Item = T>,
+        get_target: F,
+    ) where
+        T: Send + Sync + Copy,
+        F: Fn(T, usize) -> f32 + Sync + Send,
+    {
+        assert_eq!(data.concat.len(), self.visible_size.cols);
+        assert_eq!(data.activations.len(), self.hidden_size.flat);
         assert_eq!(
-            dendrite_activations.len(),
+            data.dendrite_activations.len(),
             self.hidden_size.flat * self.dendrites
         );
 
@@ -332,13 +349,14 @@ impl<'a> Decoder {
 
         self.weights
             .par_chunks_mut(col_weights_len)
-            .zip(activations.par_chunks(self.hidden_size.z))
-            .zip(dendrite_activations.par_chunks(dendrite_chunk_size))
-            .zip(expected.par_iter())
+            .zip(data.activations.par_chunks(self.hidden_size.z))
+            .zip(data.dendrite_activations.par_chunks(dendrite_chunk_size))
+            .zip(expected_iter)
             .enumerate()
             .for_each(
-                |(hidden_col, (((col_weights, col_activations), col_dendrite_acts), &exp_z))| {
+                |(hidden_col, (((col_weights, col_acts), col_dendrite_acts), exp_item))| {
                     let local_field = self.receptive_field.get_col(hidden_col);
+
                     let mut weight_deltas = vec![0; self.dendrites];
 
                     for hidden_z in 0..self.hidden_size.z {
@@ -346,12 +364,11 @@ impl<'a> Decoder {
                         let dendritic_end = dendritic_start + self.dendrites;
                         let dendritic_cell = &col_dendrite_acts[dendritic_start..dendritic_end];
 
-                        let activation = col_activations[hidden_z];
-                        let input_cell_val = f32::from(hidden_z == exp_z as usize);
-                        let error = input_cell_val - activation;
+                        let target = get_target(exp_item, hidden_z);
+                        let error = target - col_acts[hidden_z];
 
-                        for dendrite in 0..self.dendrites {
-                            weight_deltas[dendrite] = Decoder::calc_weight_delta(
+                        for (dendrite, delta_slot) in weight_deltas.iter_mut().enumerate() {
+                            *delta_slot = Decoder::calc_weight_delta(
                                 self.half_dendrites,
                                 self.lr,
                                 dendrite,
@@ -362,10 +379,11 @@ impl<'a> Decoder {
 
                         for field in local_field {
                             let concat_col = field.input_cell_idx as usize;
-                            let concat_cell = concat[concat_col] as usize;
+                            let concat_cell = data.concat[concat_col] as usize;
 
                             let rel_weights_base =
                                 field.weights_base as usize - (hidden_col * col_weights_len);
+
                             let weights_start = rel_weights_base
                                 + flat_index!(
                                     [
