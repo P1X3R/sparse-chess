@@ -154,7 +154,7 @@ impl<'a> ChessModel {
         &mut self,
         input: &[u16],
         legality_mask: &[bool],
-        expected: Option<(&[u16], &[u16])>,
+        expected: Option<(&[f32], &[f32])>,
     ) -> ModelOutput {
         let learn = expected.is_some();
 
@@ -174,8 +174,8 @@ impl<'a> ChessModel {
         let value = value_data.activations.clone();
 
         if let Some((policy_target, value_target)) = expected {
-            self.policy_head.learn(policy_target, &policy_data);
-            self.value_head.learn(value_target, &value_data);
+            self.policy_head.learn_flat(policy_target, &policy_data);
+            self.value_head.learn_flat(value_target, &value_data);
         }
 
         ModelOutput {
