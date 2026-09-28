@@ -4,9 +4,10 @@ use std::{
     path::Path,
 };
 
+use crate::decoder::Head;
 use crate::{
-    coder::{CsdrSize, softmax},
-    decoder::{Decoder, DecoderLearningData, DecoderSnapshot},
+    coder::CsdrSize,
+    decoder::DecoderSnapshot,
     encoder::{Encoder, EncoderSnapshot},
     pre_encoders::move_enc::MOVE_STRS,
     sph::{LayerParams, Sph, SphSnapshot},
@@ -64,8 +65,8 @@ pub struct ChessModel {
     pub body: Sph,
 
     bottom_encoder: Encoder,
-    policy_head: Decoder,
-    value_head: Decoder,
+    pub policy_head: Head,
+    pub value_head: Head,
 
     policy_dendrites: usize,
 }
@@ -86,9 +87,7 @@ impl<'a> ChessModel {
         assert_eq!(pipeline_sizes.len(), params.len() + 1);
 
         let (bi_x, bi_y, bi_z) = pipeline_sizes[0];
-
         let body_input_size = CsdrSize::new(bi_x, bi_y, bi_z);
-        let concat_size = CsdrSize::new(bi_x * 2, bi_y, bi_z);
 
         ChessModel {
             body: Sph::new(pipeline_sizes, params),
@@ -102,53 +101,24 @@ impl<'a> ChessModel {
                 bottom_params.vigilance,
                 bottom_params.active_ratio,
             ),
-            policy_head: Decoder::new(
-                concat_size,
+            policy_head: Head::new(
+                body_input_size,
                 ChessModel::POLICY_SIZE,
                 bottom_params.policy_half_dendrites,
-                bottom_params.radius,
+                2,
                 bottom_params.policy_scale,
                 bottom_params.policy_lr,
             ),
-            value_head: Decoder::new(
-                concat_size,
+            value_head: Head::new(
+                body_input_size,
                 ChessModel::VALUE_SIZE,
+                2,
                 bottom_params.value_half_dendrites,
-                bottom_params.radius,
                 bottom_params.value_scale,
                 bottom_params.value_lr,
             ),
 
             policy_dendrites: bottom_params.policy_half_dendrites * 2,
-        }
-    }
-
-    fn step_policy(&self, concat: &[u16], legality_mask: &[bool]) -> DecoderLearningData {
-        assert_eq!(legality_mask.len(), ChessModel::POLICY_SIZE.flat);
-
-        let mut dendrite_activations: Box<[f32]> =
-            vec![0.0; ChessModel::POLICY_SIZE.flat * self.policy_dendrites].into_boxed_slice();
-        let mut policy: Box<[f32]> = vec![0.0; ChessModel::POLICY_SIZE.z].into_boxed_slice();
-
-        self.policy_head.compute_activations(
-            concat,
-            0,
-            &mut dendrite_activations,
-            |z, cell_activation| {
-                policy[z] = if legality_mask[z] {
-                    cell_activation
-                } else {
-                    f32::NEG_INFINITY
-                }
-            },
-        );
-
-        softmax(&mut policy);
-
-        DecoderLearningData {
-            concat: concat.into(),
-            dendrite_activations,
-            activations: policy,
         }
     }
 
@@ -167,23 +137,27 @@ impl<'a> ChessModel {
 
         let feedback = self.body.step(&hidden, learn);
 
-        let mut concat = Vec::with_capacity(hidden.len() + feedback.len());
-        concat.extend_from_slice(&hidden);
-        concat.extend_from_slice(&feedback);
+        let concat = &[&hidden, &feedback[..]];
 
-        let policy_data = self.step_policy(&concat, legality_mask);
-        let (_, value_data) = self.value_head.forward(&concat);
-        let value = value_data.activations.clone();
+        let (_, policy_data) = self.policy_head.forward(concat, legality_mask);
+        let (_, value_data) = self.value_head.forward(concat, &[true, true, true]);
 
         if let Some((policy_target, value_target)) = expected {
-            self.policy_head.learn_flat(policy_target, &policy_data);
-            self.value_head.learn_flat(value_target, &value_data);
+            self.policy_head.learn(policy_target, &policy_data);
+            self.value_head.learn(value_target, &value_data);
         }
 
         ModelOutput {
             policy: policy_data.activations,
-            value,
+            value: value_data.activations,
         }
+    }
+
+    pub fn get_commited_rates(&self) -> (f32, Vec<f32>) {
+        (
+            self.bottom_encoder.get_commited_rate(),
+            self.body.get_committed_rates(),
+        )
     }
 
     fn get_snapshot(&'a self) -> ChessModelSnapshot<'a> {
@@ -200,8 +174,8 @@ impl<'a> ChessModel {
         Self {
             body: Sph::from_snapshot(snapshot.body),
             bottom_encoder: Encoder::from_snapshot(snapshot.encoder),
-            policy_head: Decoder::from_snapshot(snapshot.policy),
-            value_head: Decoder::from_snapshot(snapshot.value),
+            policy_head: Head::from_snapshot(snapshot.policy),
+            value_head: Head::from_snapshot(snapshot.value),
             policy_dendrites: snapshot.policy_dendrites,
         }
     }
@@ -219,6 +193,7 @@ impl<'a> ChessModel {
         let bytes = std::fs::read(path)?;
         let snapshot: ChessModelSnapshot = postcard::from_bytes(&bytes)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+
         Ok(ChessModel::from_snapshot(snapshot))
     }
 }
