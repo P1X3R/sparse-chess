@@ -12,8 +12,14 @@ use crate::{
 
 type LocalField = ReceptiveField<FieldEntry>;
 
+const LRELU_FACTOR: f32 = 0.01;
+
 fn unit_step(x: f32) -> f32 {
-    if x <= 0.0 { 0.0 } else { 1.0 }
+    if x < 0.0 {
+        LRELU_FACTOR
+    } else {
+        1.0
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -243,7 +249,7 @@ impl<'a> Decoder {
             let mut cell_activation_raw = 0.0;
             for d in 0..self.dendrites {
                 let da = &mut dendritic_cell[d];
-                let non_linear = (*da).max(0.0); // ReLU
+                let non_linear = (*da).max(*da * LRELU_FACTOR);
                 *da = non_linear * dendrite_scale;
 
                 let val = if d >= self.half_dendrites { *da } else { -*da };
