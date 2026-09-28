@@ -1,10 +1,10 @@
 use std::{fs::File, io::Read, path::Path};
 
-use flate2::read::GzDecoder;
 use crate::{
     chess::{ChessModel, PosAuxiliarDim},
     flat_index,
 };
+use flate2::read::GzDecoder;
 use zerocopy::FromBytes;
 use zerocopy_derive::*;
 
@@ -62,14 +62,10 @@ impl TrainingData {
         ]
     }
 
+    #[inline]
     pub fn get_blended_wdl(&self, lambda: f32) -> [f32; 3] {
-        let w_search = Self::q_d_to_win(self.root_q, self.root_d);
-        let d_search = self.root_d;
-        let l_search = Self::q_d_to_win(-self.root_q, self.root_d);
-
-        let w_result = Self::q_d_to_win(self.result_q, self.result_d);
-        let d_result = self.result_d;
-        let l_result = Self::q_d_to_win(-self.result_q, self.result_d);
+        let [w_search, d_search, l_search] = Self::get_wdl_from_q_d(self.root_q, self.root_d);
+        let [w_result, d_result, l_result] = Self::get_wdl_from_q_d(self.result_q, self.result_d);
 
         [
             (1.0 - lambda) * w_search + lambda * w_result,
@@ -112,59 +108,47 @@ pub fn read_chunk_file<P: AsRef<Path>>(path: P) -> std::io::Result<Vec<u8>> {
 pub fn lc0_to_csdr(data: &TrainingData, out: &mut [u16; ChessModel::INPUT_SIZE.cols]) {
     out.fill(0);
 
-    // Lc0 stores 8 history states, 13 planes each (12 pieces + 1 repetition).
-    // The current position is at t=0, so we only need planes 0..11.
-    // Map Lc0 plane indices to your `piece_cell` format: ((is_us * 6) + role)
-    // Us: P=7, N=8, B=9, R=10, Q=11, K=12
-    // Them: P=1, N=2, B=3, R=4, Q=5, K=6
+    // Map Lc0 planes to piece cells:
+    // Us:   P=7, N=8, B=9, R=10, Q=11, K=12  (Planes 0..5)
+    // Them: P=1, N=2, B=3, R=4, Q=5,  K=6   (Planes 6..11)
     const PLANE_TO_CELL: [u16; 12] = [7, 8, 9, 10, 11, 12, 1, 2, 3, 4, 5, 6];
 
-    // 1. Map piece bitboards to the 8x8 grid
     for sq in 0..64 {
         let bit = 1u64 << sq;
 
-        // Since Lc0's planes are already canonically transformed,
-        // we map the bit directly to the coordinates.
-        let rank = sq / 8;
-        let file = sq % 8;
-
         for (p, &piece_cell) in PLANE_TO_CELL.iter().enumerate() {
             if (data.planes[p] & bit) != 0 {
+                let rank = sq / 8;
+                let file = sq % 8;
+
                 let piece_col = flat_index!(
                     [ChessModel::INPUT_SIZE.x, ChessModel::INPUT_SIZE.y],
                     [rank, file]
                 );
                 out[piece_col] = piece_cell;
-                break; // A square can only have one piece
+                break;
             }
         }
     }
 
-    // 2. Map Auxiliary Metadata
     let meta_base = flat_index!(
         [ChessModel::INPUT_SIZE.x, ChessModel::INPUT_SIZE.y],
         [PosAuxiliarDim::AUXILIAR_X, 0]
     );
     let meta = &mut out[meta_base..(meta_base + ChessModel::INPUT_SIZE.y)];
 
-    // Castling rights (1 or 0 in V6 byte fields)
     let friendly_castle_ks = (data.castling_us_oo != 0) as u16;
     let friendly_castle_qs = (data.castling_us_ooo != 0) as u16;
     let enemy_castle_ks = (data.castling_them_oo != 0) as u16;
     let enemy_castle_qs = (data.castling_them_ooo != 0) as u16;
 
-    // EP File: side_to_move_or_enpassant acts as a column mask
-    // We mask out bit 7 just in case it leaks side-to-move info
-    let ep_mask = data.side_to_move_or_enpassant & 0x7F;
-    let ep_file = if ep_mask != 0 {
-        (ep_mask.trailing_zeros() + 1) as u16
-    } else {
-        0
-    };
+    let turn = (data.side_to_move_or_enpassant & 1) as u16;
 
-    meta[PosAuxiliarDim::FRIENDLY_RIGHTS_Y] = (friendly_castle_qs << 1) | friendly_castle_ks;
-    meta[PosAuxiliarDim::ENEMY_RIGHTS_Y] = (enemy_castle_qs << 1) | enemy_castle_ks;
-    meta[PosAuxiliarDim::EP_FILE_Y] = ep_file;
+    meta[PosAuxiliarDim::RIGHTS_US_QS_Y] = friendly_castle_qs;
+    meta[PosAuxiliarDim::RIGHTS_US_KS_Y] = friendly_castle_ks;
+    meta[PosAuxiliarDim::RIGHTS_THEM_QS_Y] = enemy_castle_qs;
+    meta[PosAuxiliarDim::RIGHTS_THEM_KS_Y] = enemy_castle_ks;
+    meta[PosAuxiliarDim::TURN_Y] = turn;
     meta[PosAuxiliarDim::HM_CLOCK_Y] =
         (data.rule50_count as usize * ChessModel::INPUT_SIZE.z / 150) as u16;
 }

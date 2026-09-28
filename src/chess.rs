@@ -18,10 +18,12 @@ pub struct PosAuxiliarDim;
 impl PosAuxiliarDim {
     pub const AUXILIAR_X: usize = 8;
 
-    pub const FRIENDLY_RIGHTS_Y: usize = 0;
-    pub const ENEMY_RIGHTS_Y: usize = 1;
-    pub const EP_FILE_Y: usize = 2;
-    pub const HM_CLOCK_Y: usize = 3;
+    pub const RIGHTS_US_QS_Y: usize = 0;
+    pub const RIGHTS_US_KS_Y: usize = 1;
+    pub const RIGHTS_THEM_QS_Y: usize = 2;
+    pub const RIGHTS_THEM_KS_Y: usize = 3;
+    pub const TURN_Y: usize = 4;
+    pub const HM_CLOCK_Y: usize = 5;
 }
 
 #[derive(Debug)]
@@ -68,7 +70,7 @@ pub struct ChessModel {
 }
 
 impl<'a> ChessModel {
-    pub const INPUT_SIZE: CsdrSize = CsdrSize::new(9, 8, 16);
+    pub const INPUT_SIZE: CsdrSize = CsdrSize::new(9, 8, 13);
     pub const POLICY_SIZE: CsdrSize = CsdrSize::new(1, 1, MOVE_STRS.len());
     pub const VALUE_SIZE: CsdrSize = CsdrSize::new(1, 1, 3); // WDL
 
