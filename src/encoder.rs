@@ -375,6 +375,14 @@ impl<'a> Encoder {
         }
     }
 
+    pub fn get_commited_rate(&self) -> f32 {
+        self.is_committed
+            .iter()
+            .filter(|&&committed| committed)
+            .count() as f32
+            / self.is_committed.len() as f32
+    }
+
     pub fn get_snapshot(&'a self) -> EncoderSnapshot<'a> {
         EncoderSnapshot {
             visible_size: self.visible_size,
