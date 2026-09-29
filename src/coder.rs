@@ -1,5 +1,24 @@
 use serde::{Deserialize, Serialize};
 
+#[macro_export]
+macro_rules! flat_index {
+    ([$d0:expr $(, $d_tail:expr)*], [$i0:expr $(, $i_tail:expr)*]) => {
+        $crate::flat_index!(@internal ($i0), [$($d_tail),*], [$($i_tail),*])
+    };
+
+    (@internal ($acc:expr), [$d_head:expr $(, $d_tail:expr)*], [$i_head:expr $(, $i_tail:expr)*]) => {
+        $crate::flat_index!(@internal (($acc) * ($d_head) + ($i_head)), [$($d_tail),*], [$($i_tail),*])
+    };
+
+    (@internal ($acc:expr), [], []) => {
+        $acc
+    };
+
+    (@internal ($acc:expr), $tt1:tt, $tt2:tt) => {
+        compile_error!("Mismatched number of dimensions and indices in flat_index!")
+    };
+}
+
 #[derive(Debug, Copy, Clone, Serialize, Deserialize)]
 pub struct CsdrSize {
     pub x: usize,
@@ -89,6 +108,70 @@ impl<T> ReceptiveField<T> {
     }
 }
 
+pub(crate) type LocalField = ReceptiveField<FieldEntry>;
+
+impl LocalField {
+    pub fn new<F>(
+        hidden_size: &CsdrSize,
+        visible_size: &CsdrSize,
+        radius: i16,
+        weight_idx_fn: F,
+    ) -> Self
+    where
+        F: Fn(usize, usize) -> u32,
+    {
+        let diameter = (2 * radius + 1) as usize;
+        let area = diameter * diameter;
+        let ratio = (
+            visible_size.x as f32 / hidden_size.x as f32,
+            visible_size.y as f32 / hidden_size.y as f32,
+        );
+
+        let mut local_field_lut = Vec::with_capacity(hidden_size.cols * area);
+        let mut local_field_offsets = Vec::with_capacity(hidden_size.cols);
+
+        for hidden_col in 0..hidden_size.cols {
+            let bounds = FieldBounds::new(
+                hidden_col % hidden_size.x,
+                hidden_col / hidden_size.x,
+                radius,
+                ratio,
+                visible_size,
+            );
+            let start_idx = local_field_lut.len() as u32;
+
+            for visible_y in bounds.clamped_start_y..=bounds.clamped_end_y {
+                let in_field_y = visible_y - bounds.field_start_y;
+
+                for visible_x in bounds.clamped_start_x..=bounds.clamped_end_x {
+                    let in_field_x = visible_x - bounds.field_start_x;
+
+                    let in_field_idx = flat_index!(
+                        [diameter, diameter],
+                        [in_field_y as usize, in_field_x as usize]
+                    );
+
+                    local_field_lut.push(FieldEntry {
+                        input_cell_idx: flat_index!(
+                            [visible_size.y, visible_size.x],
+                            [visible_y as usize, visible_x as usize]
+                        ) as u32,
+                        weights_base: weight_idx_fn(hidden_col, in_field_idx) as u32,
+                    });
+                }
+            }
+
+            let end = local_field_lut.len() as u32;
+            local_field_offsets.push((start_idx, end));
+        }
+
+        ReceptiveField {
+            lut: local_field_lut.into_boxed_slice(),
+            offsets: local_field_offsets.into_boxed_slice(),
+        }
+    }
+}
+
 #[inline]
 pub(crate) fn softmax(x: &mut [f32]) {
     let mut sum = 0.0;
@@ -103,25 +186,6 @@ pub(crate) fn softmax(x: &mut [f32]) {
     for logit in x {
         *logit *= sum_inv;
     }
-}
-
-#[macro_export]
-macro_rules! flat_index {
-    ([$d0:expr $(, $d_tail:expr)*], [$i0:expr $(, $i_tail:expr)*]) => {
-        $crate::flat_index!(@internal ($i0), [$($d_tail),*], [$($i_tail),*])
-    };
-
-    (@internal ($acc:expr), [$d_head:expr $(, $d_tail:expr)*], [$i_head:expr $(, $i_tail:expr)*]) => {
-        $crate::flat_index!(@internal (($acc) * ($d_head) + ($i_head)), [$($d_tail),*], [$($i_tail),*])
-    };
-
-    (@internal ($acc:expr), [], []) => {
-        $acc
-    };
-
-    (@internal ($acc:expr), $tt1:tt, $tt2:tt) => {
-        compile_error!("Mismatched number of dimensions and indices in flat_index!")
-    };
 }
 
 #[inline]

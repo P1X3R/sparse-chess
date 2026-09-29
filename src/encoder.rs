@@ -3,11 +3,10 @@ use std::borrow::Cow;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    coder::{CsdrSize, FieldBounds, FieldEntry, ReceptiveField},
+    coder::{CsdrSize, FieldEntry, LocalField, ReceptiveField},
     flat_index,
 };
 
-type LocalField = ReceptiveField<FieldEntry>;
 type LearningField = ReceptiveField<u32>;
 
 const BYTE_INV: f32 = 1.0 / 255.0;
@@ -69,7 +68,12 @@ impl<'a> Encoder {
         let diameter = radius * 2 + 1;
         let area = (diameter * diameter) as usize;
         let learning_field = Encoder::init_learning_field_lut(&hidden_size, learning_radius);
-        let receptive_field = Encoder::init_local_field_lut(&hidden_size, &visible_size, radius);
+        let receptive_field = LocalField::new(
+            &hidden_size,
+            &visible_size,
+            radius,
+            Self::local_field_weight_idx(&hidden_size, area),
+        );
 
         let mut rng = fastrand::Rng::new();
 
@@ -95,6 +99,17 @@ impl<'a> Encoder {
         }
     }
 
+    #[inline]
+    fn local_field_weight_idx(hidden_size: &CsdrSize, area: usize) -> impl Fn(usize, usize) -> u32 {
+        move |hidden_col: usize, in_field_idx: usize| {
+            flat_index!(
+                [visible_size.z, hidden_size.cols, area, hidden_size.z],
+                [0, hidden_col, in_field_idx, 0]
+            ) as u32
+        }
+    }
+
+    #[inline]
     fn compute_deltas(lr: f32) -> [u8; 256] {
         std::array::from_fn(|w| (w as u8).saturating_add((lr * (255.0 - w as f32)).ceil() as u8))
     }
@@ -143,65 +158,6 @@ impl<'a> Encoder {
         LearningField {
             lut: learning_field_lut.into_boxed_slice(),
             offsets: learning_field_offsets.into_boxed_slice(),
-        }
-    }
-
-    fn init_local_field_lut(
-        hidden_size: &CsdrSize,
-        visible_size: &CsdrSize,
-        radius: i16,
-    ) -> LocalField {
-        let diameter = (2 * radius + 1) as usize;
-        let area = diameter * diameter;
-        let ratio = (
-            visible_size.x as f32 / hidden_size.x as f32,
-            visible_size.y as f32 / hidden_size.y as f32,
-        );
-
-        let mut local_field_lut = Vec::with_capacity(hidden_size.cols * area);
-        let mut local_field_offsets = Vec::with_capacity(hidden_size.cols);
-
-        for hidden_col in 0..hidden_size.cols {
-            let bounds = FieldBounds::new(
-                hidden_col % hidden_size.x,
-                hidden_col / hidden_size.x,
-                radius,
-                ratio,
-                visible_size,
-            );
-            let start_idx = local_field_lut.len() as u32;
-
-            for visible_y in bounds.clamped_start_y..=bounds.clamped_end_y {
-                let in_field_y = visible_y - bounds.field_start_y;
-
-                for visible_x in bounds.clamped_start_x..=bounds.clamped_end_x {
-                    let in_field_x = visible_x - bounds.field_start_x;
-
-                    let in_field_idx = flat_index!(
-                        [diameter, diameter],
-                        [in_field_y as usize, in_field_x as usize]
-                    );
-
-                    local_field_lut.push(FieldEntry {
-                        input_cell_idx: flat_index!(
-                            [visible_size.y, visible_size.x],
-                            [visible_y as usize, visible_x as usize]
-                        ) as u32,
-                        weights_base: flat_index!(
-                            [visible_size.z, hidden_size.cols, area, hidden_size.z],
-                            [0, hidden_col, in_field_idx, 0]
-                        ) as u32,
-                    });
-                }
-            }
-
-            let end = local_field_lut.len() as u32;
-            local_field_offsets.push((start_idx, end));
-        }
-
-        ReceptiveField {
-            lut: local_field_lut.into_boxed_slice(),
-            offsets: local_field_offsets.into_boxed_slice(),
         }
     }
 
@@ -401,16 +357,18 @@ impl<'a> Encoder {
 
     pub fn from_snapshot(snapshot: EncoderSnapshot) -> Self {
         let diameter = (snapshot.radius * 2) + 1;
+        let area = (diameter * diameter) as usize;
 
         Self {
             visible_size: snapshot.visible_size,
             hidden_size: snapshot.hidden_size,
-            area: (diameter * diameter) as usize,
+            area,
             learning_radius: snapshot.learning_radius,
-            receptive_field: Encoder::init_local_field_lut(
+            receptive_field: LocalField::new(
                 &snapshot.hidden_size,
                 &snapshot.visible_size,
                 snapshot.radius,
+                Self::local_field_weight_idx(&snapshot.hidden_size, area),
             ),
             learning_field: Encoder::init_learning_field_lut(
                 &snapshot.hidden_size,

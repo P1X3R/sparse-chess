@@ -4,23 +4,14 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    coder::{
-        column_wise_one_hot, rand_round, softmax, CsdrSize, FieldBounds, FieldEntry,
-        ReceptiveField,
-    },
+    coder::{CsdrSize, FieldEntry, LocalField, column_wise_one_hot, rand_round, softmax},
     flat_index,
 };
-
-type LocalField = ReceptiveField<FieldEntry>;
 
 const LRELU_FACTOR: f32 = 0.01;
 
 fn unit_step(x: f32) -> f32 {
-    if x < 0.0 {
-        LRELU_FACTOR
-    } else {
-        1.0
-    }
+    if x < 0.0 { LRELU_FACTOR } else { 1.0 }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -72,12 +63,17 @@ impl<'a> Decoder {
         let diameter = radius * 2 + 1;
         let area = (diameter * diameter) as usize;
 
-        let receptive_field = Decoder::init_receptive_field(
+        let receptive_field = LocalField::new(
             &hidden_size,
             &visible_size,
-            num_visible_layers,
-            dendrites,
             radius,
+            Self::local_field_weight_idx(
+                &hidden_size,
+                &visible_size,
+                num_visible_layers,
+                dendrites,
+                area,
+            ),
         );
 
         let total_weights = hidden_size.cols
@@ -103,71 +99,26 @@ impl<'a> Decoder {
         }
     }
 
-    fn init_receptive_field(
+    #[inline]
+    fn local_field_weight_idx(
         hidden_size: &CsdrSize,
         visible_size: &CsdrSize,
         num_visible_layers: usize,
         dendrites: usize,
-        radius: i16,
-    ) -> LocalField {
-        let diameter = (2 * radius + 1) as usize;
-        let area = diameter * diameter;
-        let ratio = (
-            visible_size.x as f32 / hidden_size.x as f32,
-            visible_size.y as f32 / hidden_size.y as f32,
-        );
-
-        let mut local_field_lut = Vec::with_capacity(hidden_size.cols * area);
-        let mut local_field_offsets = Vec::with_capacity(hidden_size.cols);
-
-        for hidden_col in 0..hidden_size.cols {
-            let bounds = FieldBounds::new(
-                hidden_col % hidden_size.x,
-                hidden_col / hidden_size.x,
-                radius,
-                ratio,
-                visible_size,
-            );
-            let start_idx = local_field_lut.len() as u32;
-
-            for visible_y in bounds.clamped_start_y..=bounds.clamped_end_y {
-                let in_field_y = visible_y - bounds.field_start_y;
-
-                for visible_x in bounds.clamped_start_x..=bounds.clamped_end_x {
-                    let in_field_x = visible_x - bounds.field_start_x;
-
-                    let in_field_idx = flat_index!(
-                        [diameter, diameter],
-                        [in_field_y as usize, in_field_x as usize]
-                    );
-
-                    local_field_lut.push(FieldEntry {
-                        input_cell_idx: flat_index!(
-                            [visible_size.y, visible_size.x],
-                            [visible_y as usize, visible_x as usize]
-                        ) as u32,
-                        weights_base: flat_index!(
-                            [
-                                hidden_size.cols,
-                                num_visible_layers,
-                                visible_size.z,
-                                area,
-                                hidden_size.z,
-                                dendrites
-                            ],
-                            [hidden_col, 0, 0, in_field_idx, 0, 0]
-                        ) as u32,
-                    });
-                }
-            }
-
-            let end = local_field_lut.len() as u32;
-            local_field_offsets.push((start_idx, end));
-        }
-
-        ReceptiveField {
-            lut: local_field_lut.into_boxed_slice(),
-            offsets: local_field_offsets.into_boxed_slice(),
+        area: usize,
+    ) -> impl Fn(usize, usize) -> u32 {
+        move |hidden_col: usize, in_field_idx: usize| {
+            flat_index!(
+                [
+                    hidden_size.cols,
+                    num_visible_layers,
+                    visible_size.z,
+                    area,
+                    hidden_size.z,
+                    dendrites
+                ],
+                [hidden_col, 0, 0, in_field_idx, 0, 0]
+            ) as u32
         }
     }
 
@@ -255,8 +206,7 @@ impl<'a> Decoder {
         let activation_scale = 1.0 / self.dendrites as f32;
 
         for hidden_z in 0..self.hidden_size.z {
-            let dendritic_start =
-                flat_index!([self.hidden_size.z, self.dendrites], [hidden_z, 0]);
+            let dendritic_start = flat_index!([self.hidden_size.z, self.dendrites], [hidden_z, 0]);
             let dendritic_end = dendritic_start + self.dendrites;
             let dendritic_cell = &mut dendrite_col[dendritic_start..dendritic_end];
 
@@ -266,11 +216,7 @@ impl<'a> Decoder {
                 let non_linear = (*da).max(*da * LRELU_FACTOR);
                 *da = non_linear * dendrite_scale;
 
-                let val = if d >= self.half_dendrites {
-                    *da
-                } else {
-                    -*da
-                };
+                let val = if d >= self.half_dendrites { *da } else { -*da };
                 cell_activation_raw += val;
             }
 
@@ -423,8 +369,8 @@ impl<'a> Decoder {
                             for (v_layer, layer_data) in data.concat.iter().enumerate() {
                                 let concat_cell = layer_data[input_col] as usize;
 
-                                let rel_weights_base = field.weights_base as usize
-                                    - (hidden_col * col_weights_len);
+                                let rel_weights_base =
+                                    field.weights_base as usize - (hidden_col * col_weights_len);
 
                                 let weights_start = rel_weights_base
                                     + flat_index!(
@@ -468,15 +414,21 @@ impl<'a> Decoder {
 
     pub fn from_snapshot(snapshot: DecoderSnapshot) -> Option<Self> {
         let dendrites = snapshot.half_dendrites * 2;
-        let diameter = snapshot.radius? * 2 + 1;
+        let radius = snapshot.radius?;
+        let diameter = radius * 2 + 1;
         let area = (diameter * diameter) as usize;
 
-        let receptive_field = Decoder::init_receptive_field(
+        let receptive_field = LocalField::new(
             &snapshot.hidden_size,
             &snapshot.visible_size,
-            snapshot.num_visible_layers,
-            dendrites,
-            snapshot.radius?,
+            radius,
+            Self::local_field_weight_idx(
+                &snapshot.hidden_size,
+                &snapshot.visible_size,
+                snapshot.num_visible_layers,
+                dendrites,
+                area,
+            ),
         );
 
         Some(Self {
@@ -518,11 +470,8 @@ impl<'a> Head {
         let mut rng = fastrand::Rng::new();
         let dendrites = half_dendrites * 2;
 
-        let total_weights = hidden_size.flat
-            * num_visible_layers
-            * visible_size.cols
-            * visible_size.z
-            * dendrites;
+        let total_weights =
+            hidden_size.flat * num_visible_layers * visible_size.cols * visible_size.z * dendrites;
 
         Self {
             visible_size,
@@ -558,12 +507,7 @@ impl<'a> Head {
                 self.dendrites
             ],
             [
-                hidden_col,
-                hidden_z,
-                v_layer,
-                concat_col,
-                concat_z,
-                dendrite
+                hidden_col, hidden_z, v_layer, concat_col, concat_z, dendrite
             ]
         )
     }
@@ -592,14 +536,8 @@ impl<'a> Head {
 
                         debug_assert!(concat_z < self.visible_size.z);
 
-                        let weights_start = self.get_weight_idx(
-                            hidden_col,
-                            hidden_z,
-                            v_layer,
-                            concat_col,
-                            concat_z,
-                            0,
-                        );
+                        let weights_start = self
+                            .get_weight_idx(hidden_col, hidden_z, v_layer, concat_col, concat_z, 0);
                         let weights_end = weights_start + self.dendrites;
                         let weights_cell = &self.weights[weights_start..weights_end];
 
@@ -659,11 +597,7 @@ impl<'a> Head {
                     let non_linear = (*da).max(*da * LRELU_FACTOR);
                     *da = non_linear * dendrite_scale;
 
-                    let val = if d >= self.half_dendrites {
-                        *da
-                    } else {
-                        -*da
-                    };
+                    let val = if d >= self.half_dendrites { *da } else { -*da };
                     cell_activation_raw += val;
                 }
 
@@ -730,8 +664,7 @@ impl<'a> Head {
             self.hidden_size.flat * self.dendrites
         );
 
-        let z_weights_len =
-            self.num_visible_layers * self.visible_size.flat * self.dendrites;
+        let z_weights_len = self.num_visible_layers * self.visible_size.flat * self.dendrites;
 
         self.weights
             .par_chunks_mut(z_weights_len)
@@ -775,8 +708,8 @@ impl<'a> Head {
                         let weights_cell = &mut z_weights[weights_start..weights_end];
 
                         for dendrite in 0..self.dendrites {
-                            weights_cell[dendrite] = weights_cell[dendrite]
-                                .saturating_add(weight_deltas[dendrite]);
+                            weights_cell[dendrite] =
+                                weights_cell[dendrite].saturating_add(weight_deltas[dendrite]);
                         }
                     }
                 }
