@@ -40,7 +40,6 @@ struct ChessModelSnapshot<'a> {
     value: DecoderSnapshot<'a>,
     encoder: EncoderSnapshot<'a>,
     body: SphSnapshot<'a>,
-    policy_dendrites: usize,
 }
 
 #[derive(Debug)]
@@ -66,8 +65,6 @@ pub struct ChessModel {
     bottom_encoder: Encoder,
     pub policy_head: Head,
     pub value_head: Head,
-
-    policy_dendrites: usize,
 }
 
 impl<'a> ChessModel {
@@ -116,8 +113,6 @@ impl<'a> ChessModel {
                 bottom_params.value_scale,
                 bottom_params.value_lr,
             ),
-
-            policy_dendrites: bottom_params.policy_half_dendrites * 2,
         }
     }
 
@@ -165,7 +160,6 @@ impl<'a> ChessModel {
             value: self.value_head.get_snapshot(),
             encoder: self.bottom_encoder.get_snapshot(),
             body: self.body.get_snapshot(),
-            policy_dendrites: self.policy_dendrites,
         }
     }
 
@@ -175,7 +169,6 @@ impl<'a> ChessModel {
             bottom_encoder: Encoder::from_snapshot(snapshot.encoder),
             policy_head: Head::from_snapshot(snapshot.policy),
             value_head: Head::from_snapshot(snapshot.value),
-            policy_dendrites: snapshot.policy_dendrites,
         }
     }
 
