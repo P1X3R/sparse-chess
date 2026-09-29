@@ -54,18 +54,18 @@ impl TrainingData {
     }
 
     #[inline]
-    pub fn get_wdl(&self) -> [f32; 3] {
+    pub fn get_wdl(q: f32, d: f32) -> [f32; 3] {
         [
-            Self::q_d_to_win(self.root_q, self.root_d),
-            self.root_d, // Draw
-            Self::q_d_to_win(-self.root_q, self.root_d),
+            Self::q_d_to_win(q, d),
+            d, // Draw
+            Self::q_d_to_win(-q, d),
         ]
     }
 
     #[inline]
     pub fn get_blended_wdl(&self, lambda: f32) -> [f32; 3] {
-        let [w_search, d_search, l_search] = Self::get_wdl_from_q_d(self.root_q, self.root_d);
-        let [w_result, d_result, l_result] = Self::get_wdl_from_q_d(self.result_q, self.result_d);
+        let [w_search, d_search, l_search] = Self::get_wdl(self.root_q, self.root_d);
+        let [w_result, d_result, l_result] = Self::get_wdl(self.result_q, self.result_d);
 
         [
             (1.0 - lambda) * w_search + lambda * w_result,
