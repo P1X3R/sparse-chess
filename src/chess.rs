@@ -3,22 +3,19 @@ use std::{
     path::Path,
 };
 
-use crate::decoder::Head;
 use crate::{
     coder::CsdrSize,
     decoder::DecoderSnapshot,
     encoder::{Encoder, EncoderSnapshot},
-    pre_encoders::move_enc::MOVE_STRS,
     sph::{LayerParams, Sph, SphSnapshot},
 };
+use crate::{decoder::Head, encoder::EncoderVisibleParams};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 
 #[derive(Debug)]
 pub struct PosAuxiliarDim;
 impl PosAuxiliarDim {
-    pub const AUXILIAR_X: usize = 8;
-
     pub const RIGHTS_US_QS_Y: usize = 0;
     pub const RIGHTS_US_KS_Y: usize = 1;
     pub const RIGHTS_THEM_QS_Y: usize = 2;
@@ -68,8 +65,9 @@ pub struct ChessModel {
 }
 
 impl<'a> ChessModel {
-    pub const INPUT_SIZE: CsdrSize = CsdrSize::new(9, 8, 13);
-    pub const POLICY_SIZE: CsdrSize = CsdrSize::new(1, 1, MOVE_STRS.len());
+    pub const PLANES_SIZE: CsdrSize = CsdrSize::new(8, 8, 13);
+    pub const AUXILIARY_SIZE: CsdrSize = CsdrSize::new(1, 6, 13);
+    pub const POLICY_SIZE: CsdrSize = CsdrSize::new(1, 1, 1858);
     pub const VALUE_SIZE: CsdrSize = CsdrSize::new(1, 1, 3); // WDL
 
     pub fn new(
@@ -88,9 +86,17 @@ impl<'a> ChessModel {
         ChessModel {
             body: Sph::new(pipeline_sizes, params),
             bottom_encoder: Encoder::new(
-                ChessModel::INPUT_SIZE,
                 body_input_size,
-                bottom_params.radius,
+                &[
+                    EncoderVisibleParams {
+                        visible_size: Self::PLANES_SIZE,
+                        radius: bottom_params.radius,
+                    },
+                    EncoderVisibleParams {
+                        visible_size: Self::AUXILIARY_SIZE,
+                        radius: 3,
+                    },
+                ],
                 bottom_params.learning_radius,
                 bottom_params.encoder_lr,
                 bottom_params.choice,
@@ -118,7 +124,7 @@ impl<'a> ChessModel {
 
     pub fn step(
         &mut self,
-        input: &[u16],
+        input: &[&[u16]],
         legality_mask: &[bool],
         expected: Option<(&[f32], &[f32])>,
     ) -> ModelOutput {

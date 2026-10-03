@@ -105,14 +105,20 @@ pub fn read_chunk_file<P: AsRef<Path>>(path: P) -> std::io::Result<Vec<u8>> {
     Ok(buffer)
 }
 
-pub fn lc0_to_csdr(data: &TrainingData, out: &mut [u16; ChessModel::INPUT_SIZE.cols]) {
-    out.fill(0);
+pub fn lc0_to_csdr(data: &TrainingData, out: &mut [&mut [u16]; 2]) {
+    let (left, right) = out.split_at_mut(1);
+    let planes = &mut left[0];
+    let aux = &mut right[0];
+
+    assert_eq!(planes.len(), ChessModel::PLANES_SIZE.cols);
+    assert_eq!(aux.len(), ChessModel::AUXILIARY_SIZE.cols);
 
     // Map Lc0 planes to piece cells:
     // Us:   P=7, N=8, B=9, R=10, Q=11, K=12  (Planes 0..5)
     // Them: P=1, N=2, B=3, R=4, Q=5,  K=6   (Planes 6..11)
     const PLANE_TO_CELL: [u16; 12] = [7, 8, 9, 10, 11, 12, 1, 2, 3, 4, 5, 6];
 
+    planes.fill(0);
     for sq in 0..64 {
         let bit = 1u64 << sq;
 
@@ -122,20 +128,14 @@ pub fn lc0_to_csdr(data: &TrainingData, out: &mut [u16; ChessModel::INPUT_SIZE.c
                 let file = sq % 8;
 
                 let piece_col = flat_index!(
-                    [ChessModel::INPUT_SIZE.x, ChessModel::INPUT_SIZE.y],
+                    [ChessModel::INPUT_SIZE.x, ChessModel::PLANES_SIZE.y],
                     [rank, file]
                 );
-                out[piece_col] = piece_cell;
+                planes[piece_col] = piece_cell;
                 break;
             }
         }
     }
-
-    let meta_base = flat_index!(
-        [ChessModel::INPUT_SIZE.x, ChessModel::INPUT_SIZE.y],
-        [PosAuxiliarDim::AUXILIAR_X, 0]
-    );
-    let meta = &mut out[meta_base..(meta_base + ChessModel::INPUT_SIZE.y)];
 
     let friendly_castle_ks = (data.castling_us_oo != 0) as u16;
     let friendly_castle_qs = (data.castling_us_ooo != 0) as u16;
@@ -144,11 +144,11 @@ pub fn lc0_to_csdr(data: &TrainingData, out: &mut [u16; ChessModel::INPUT_SIZE.c
 
     let turn = (data.side_to_move_or_enpassant & 1) as u16;
 
-    meta[PosAuxiliarDim::RIGHTS_US_QS_Y] = friendly_castle_qs;
-    meta[PosAuxiliarDim::RIGHTS_US_KS_Y] = friendly_castle_ks;
-    meta[PosAuxiliarDim::RIGHTS_THEM_QS_Y] = enemy_castle_qs;
-    meta[PosAuxiliarDim::RIGHTS_THEM_KS_Y] = enemy_castle_ks;
-    meta[PosAuxiliarDim::TURN_Y] = turn;
-    meta[PosAuxiliarDim::HM_CLOCK_Y] =
-        (data.rule50_count as usize * ChessModel::INPUT_SIZE.z / 150) as u16;
+    aux[PosAuxiliarDim::RIGHTS_US_QS_Y] = friendly_castle_qs;
+    aux[PosAuxiliarDim::RIGHTS_US_KS_Y] = friendly_castle_ks;
+    aux[PosAuxiliarDim::RIGHTS_THEM_QS_Y] = enemy_castle_qs;
+    aux[PosAuxiliarDim::RIGHTS_THEM_KS_Y] = enemy_castle_ks;
+    aux[PosAuxiliarDim::TURN_Y] = turn;
+    aux[PosAuxiliarDim::HM_CLOCK_Y] =
+        (data.rule50_count as usize * ChessModel::PLANES_SIZE.z / 150) as u16;
 }

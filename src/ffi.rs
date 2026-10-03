@@ -1,5 +1,5 @@
-use std::ffi::c_char;
 use crate::chess::ChessModel;
+use std::ffi::c_char;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn chess_model_load(path: *const c_char) -> *mut ChessModel {
@@ -38,7 +38,9 @@ pub extern "C" fn chess_model_evaluate(
     let input = unsafe { std::slice::from_raw_parts(input_ptr, input_len) };
     let legality_mask = unsafe { std::slice::from_raw_parts(legality_mask_ptr, mask_len) };
 
-    let output = model.step(input, legality_mask, None);
+    let (planes, aux) = input.split_at(ChessModel::PLANES_SIZE.cols);
+
+    let output = model.step(&[planes, aux], legality_mask, None);
 
     unsafe {
         std::ptr::copy_nonoverlapping(output.policy.as_ptr(), out_policy, output.policy.len());

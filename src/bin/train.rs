@@ -21,7 +21,7 @@ const BOTTOM_PARAMS: BottomLayerParams = BottomLayerParams {
     policy_scale: 1.0,
     value_lr: 0.08,
     value_half_dendrites: 6,
-    value_scale: 1.0,
+    value_scale: 8.0,
 };
 
 const PARAMS: [LayerParams; BODY_LEN] = [
@@ -43,7 +43,7 @@ const PARAMS: [LayerParams; BODY_LEN] = [
         learning_radius: 1,
         choice: 1e-4,
         vigilance: 0.9,
-        active_ratio: 0.2,
+        active_ratio: 0.1,
         half_dendrites: 3,
         decoder_scale: 8.0,
     },
@@ -62,7 +62,8 @@ const MAX_LR: f32 = 0.06;
 const TOTAL_GAMES: usize = 50000;
 
 struct ValSample {
-    encoded: [u16; ChessModel::INPUT_SIZE.cols],
+    planes: [u16; ChessModel::PLANES_SIZE.cols],
+    aux: [u16; ChessModel::AUXILIARY_SIZE.cols],
     legality_mask: [bool; 1858],
     policy_target: [f32; 1858],
     value_target: [f32; 3],
@@ -111,7 +112,7 @@ fn evaluate_validation(model: &mut ChessModel, samples: &[ValSample]) {
     let start = Instant::now();
 
     for sample in samples {
-        let output = model.step(&sample.encoded, &sample.legality_mask, None);
+        let output = model.step(&[&sample.planes, &sample.aux], &sample.legality_mask, None);
 
         debug_assert!(
             output
@@ -172,7 +173,7 @@ fn evaluate_validation(model: &mut ChessModel, samples: &[ValSample]) {
 }
 
 fn main() -> std::io::Result<()> {
-    fastrand::seed(42);
+    fastrand::seed(6457827717110365317);
 
     let dir_path = "training-run1-test80-20240401-0017";
     let model_path = "model.bin";
@@ -196,7 +197,8 @@ fn main() -> std::io::Result<()> {
 
     fastrand::shuffle(&mut gz_files);
 
-    let mut encoded_buf = [0; ChessModel::INPUT_SIZE.cols];
+    let mut planes = [0u16; ChessModel::PLANES_SIZE.cols];
+    let mut aux = [0u16; ChessModel::AUXILIARY_SIZE.cols];
 
     // 10% split ratio
     let val_split_idx = ((gz_files.len() as f32) * 0.1).round() as usize;
@@ -211,11 +213,15 @@ fn main() -> std::io::Result<()> {
         let game = load_records_from_bytes(&bytes);
 
         for pos in game {
-            let mut encoded = [0; ChessModel::INPUT_SIZE.cols];
+            let mut planes = [0u16; ChessModel::PLANES_SIZE.cols];
+            let mut aux = [0u16; ChessModel::AUXILIARY_SIZE.cols];
+            let mut encoded = [&mut planes[..], &mut aux[..]];
+
             lc0_to_csdr(&pos, &mut encoded);
 
             val_buffer.push(ValSample {
-                encoded,
+                planes,
+                aux,
                 legality_mask: pos.probabilities.map(|p| p >= 0.0),
                 policy_target: pos.probabilities.map(|p| p.max(0.0)),
                 value_target: pos.get_blended_wdl(LAMBDA),
@@ -247,14 +253,14 @@ fn main() -> std::io::Result<()> {
         let game = load_records_from_bytes(&bytes).to_vec();
 
         for training_pos in &game {
-            lc0_to_csdr(training_pos, &mut encoded_buf);
+            lc0_to_csdr(training_pos, &mut [&mut planes[..], &mut aux[..]]);
 
             let policy_target = training_pos.probabilities.map(|p| p.max(0.0));
             let legality_mask = training_pos.probabilities.map(|p| p >= 0.0);
             let value_target = training_pos.get_blended_wdl(LAMBDA);
 
             let output = model.step(
-                &encoded_buf,
+                &[&planes, &aux],
                 &legality_mask,
                 Some((&policy_target, &value_target)),
             );

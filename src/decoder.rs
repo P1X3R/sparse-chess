@@ -288,33 +288,9 @@ impl<'a> Decoder {
         rand_round(delta) as i8
     }
 
-    pub fn learn_flat(&mut self, expected: &[f32], data: &DecoderLearningData) {
-        assert_eq!(expected.len(), data.activations.len());
-
-        let expected_chunks = expected.par_chunks(self.hidden_size.z);
-        self.learn_core(data, expected_chunks, |exp_chunk, hidden_z| {
-            exp_chunk[hidden_z]
-        });
-    }
-
     pub fn learn(&mut self, expected: &[u16], data: &DecoderLearningData) {
         assert_eq!(expected.len(), self.hidden_size.cols);
 
-        let expected_items = expected.par_iter();
-        self.learn_core(data, expected_items, |&exp_z, hidden_z| {
-            f32::from(hidden_z == exp_z as usize)
-        });
-    }
-
-    fn learn_core<T, F>(
-        &mut self,
-        data: &'a DecoderLearningData,
-        expected_iter: impl IndexedParallelIterator<Item = T>,
-        get_target: F,
-    ) where
-        T: Send + Sync + Copy,
-        F: Fn(T, usize) -> f32 + Sync + Send,
-    {
         assert!(data.concat.len() <= self.num_visible_layers);
         assert!(!data.concat.is_empty());
         for layer in &data.concat {
@@ -337,10 +313,10 @@ impl<'a> Decoder {
             .par_chunks_mut(col_weights_len)
             .zip(data.activations.par_chunks(self.hidden_size.z))
             .zip(data.dendrite_activations.par_chunks(dendrite_chunk_size))
-            .zip(expected_iter)
+            .zip(expected.par_iter())
             .enumerate()
             .for_each(
-                |(hidden_col, (((col_weights, col_acts), col_dendrite_acts), exp_item))| {
+                |(hidden_col, (((col_weights, col_acts), col_dendrite_acts), &exp_z))| {
                     let local_field = self.receptive_field.get_col(hidden_col);
 
                     let mut weight_deltas = vec![0; self.dendrites];
@@ -350,7 +326,7 @@ impl<'a> Decoder {
                         let dendritic_end = dendritic_start + self.dendrites;
                         let dendritic_cell = &col_dendrite_acts[dendritic_start..dendritic_end];
 
-                        let target = get_target(exp_item, hidden_z);
+                        let target = f32::from(hidden_z == exp_z as usize);
                         let error = target - col_acts[hidden_z];
 
                         for (dendrite, delta_slot) in weight_deltas.iter_mut().enumerate() {
@@ -528,8 +504,11 @@ impl<'a> Head {
         target_slice
             .par_chunks_mut(self.dendrites)
             .enumerate()
-            .filter(|&(hidden_z, _)| mask_col[hidden_z])
             .for_each(|(hidden_z, dendritic_activations_cell)| {
+                if !mask_col[hidden_z] {
+                    return;
+                }
+
                 for (v_layer, layer_data) in visible_layers.iter().enumerate() {
                     for concat_col in 0..self.visible_size.cols {
                         let concat_z = layer_data[concat_col] as usize;
@@ -580,29 +559,26 @@ impl<'a> Head {
         let base_end = base_start + self.hidden_size.z * self.dendrites;
         let col_dendrites = &mut dendrite_activations[base_start..base_end];
 
-        col_dendrites
-            .par_chunks_mut(self.dendrites)
-            .zip(activation_col.par_iter_mut())
-            .zip(mask_col)
-            .for_each(|((dendritic_cell, cell_activation), is_active)| {
-                if !is_active {
-                    *cell_activation = f32::NEG_INFINITY;
-                    return;
-                }
+        for hidden_z in 0..self.hidden_size.z {
+            if !mask_col[hidden_z] {
+                activation_col[hidden_z] = f32::NEG_INFINITY;
+                continue;
+            }
 
-                let mut cell_activation_raw = 0.0;
+            let mut cell_activation_raw = 0.0;
+            let offset = hidden_z * self.dendrites;
 
-                for d in 0..self.dendrites {
-                    let da = &mut dendritic_cell[d];
-                    let non_linear = (*da).max(*da * LRELU_FACTOR);
-                    *da = non_linear * dendrite_scale;
+            for d in 0..self.dendrites {
+                let da = &mut col_dendrites[offset + d];
+                let non_linear = (*da).max(*da * LRELU_FACTOR);
+                *da = non_linear * dendrite_scale;
 
-                    let val = if d >= self.half_dendrites { *da } else { -*da };
-                    cell_activation_raw += val;
-                }
+                let val = if d >= self.half_dendrites { *da } else { -*da };
+                cell_activation_raw += val;
+            }
 
-                *cell_activation = cell_activation_raw * activation_scale;
-            });
+            activation_col[hidden_z] = cell_activation_raw * activation_scale;
+        }
     }
 
     pub fn forward(
@@ -671,49 +647,49 @@ impl<'a> Head {
             .zip(data.activations.par_iter())
             .zip(data.dendrite_activations.par_chunks(self.dendrites))
             .zip(expected.par_iter())
-            .for_each(|(((z_weights, &act), dendritic_cell), target)| {
-                let error = target - act;
+            .for_each_init(
+                || vec![0; self.dendrites],
+                |weight_deltas, (((z_weights, &act), dendritic_cell), target)| {
+                    let error = target - act;
 
-                if act == f32::NEG_INFINITY || error.abs() < f32::EPSILON {
-                    return;
-                }
+                    if act == f32::NEG_INFINITY || error.abs() < f32::EPSILON {
+                        return;
+                    }
 
-                let mut weight_deltas = vec![0; self.dendrites];
-                for (dendrite, delta_slot) in weight_deltas.iter_mut().enumerate() {
-                    *delta_slot = Decoder::calc_weight_delta(
-                        self.half_dendrites,
-                        self.lr,
-                        dendrite,
-                        dendritic_cell,
-                        error,
-                    );
-                }
-
-                for (v_layer, layer_data) in data.concat.iter().enumerate() {
-                    for concat_col in 0..self.visible_size.cols {
-                        let concat_z = layer_data[concat_col] as usize;
-
-                        let rel_start = flat_index!(
-                            [
-                                self.num_visible_layers,
-                                self.visible_size.cols,
-                                self.visible_size.z,
-                                self.dendrites
-                            ],
-                            [v_layer, concat_col, concat_z, 0]
+                    for (dendrite, delta_slot) in weight_deltas.iter_mut().enumerate() {
+                        *delta_slot = Decoder::calc_weight_delta(
+                            self.half_dendrites,
+                            self.lr,
+                            dendrite,
+                            dendritic_cell,
+                            error,
                         );
+                    }
 
-                        let weights_start = rel_start;
-                        let weights_end = weights_start + self.dendrites;
-                        let weights_cell = &mut z_weights[weights_start..weights_end];
+                    for (v_layer, layer_data) in data.concat.iter().enumerate() {
+                        for concat_col in 0..self.visible_size.cols {
+                            let concat_z = layer_data[concat_col] as usize;
 
-                        for dendrite in 0..self.dendrites {
-                            weights_cell[dendrite] =
-                                weights_cell[dendrite].saturating_add(weight_deltas[dendrite]);
+                            let weights_start = flat_index!(
+                                [
+                                    self.num_visible_layers,
+                                    self.visible_size.cols,
+                                    self.visible_size.z,
+                                    self.dendrites
+                                ],
+                                [v_layer, concat_col, concat_z, 0]
+                            );
+                            let weights_end = weights_start + self.dendrites;
+                            let weights_cell = &mut z_weights[weights_start..weights_end];
+
+                            for dendrite in 0..self.dendrites {
+                                weights_cell[dendrite] =
+                                    weights_cell[dendrite].saturating_add(weight_deltas[dendrite]);
+                            }
                         }
                     }
-                }
-            });
+                },
+            );
     }
 
     pub fn get_snapshot(&'a self) -> DecoderSnapshot<'a> {

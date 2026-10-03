@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     coder::CsdrSize,
     decoder::{Decoder, DecoderLearningData, DecoderSnapshot},
-    encoder::{Encoder, EncoderSnapshot},
+    encoder::{Encoder, EncoderSnapshot, EncoderVisibleParams},
 };
 
 #[derive(Serialize, Deserialize)]
@@ -49,7 +49,7 @@ pub struct LayerParams {
 impl SphLayer {
     pub fn new(encoder: Encoder, decoder: Decoder) -> Self {
         let hidden_cols = encoder.hidden_size.cols;
-        let visible_cols = encoder.visible_size.cols;
+        let visible_cols = encoder.visible_layers[0].visible_size.cols;
 
         Self {
             encoder,
@@ -89,9 +89,11 @@ impl<'a> Sph {
 
                 SphLayer::new(
                     Encoder::new(
-                        visible_size,
                         hidden_size,
-                        layer_params.radius,
+                        &[EncoderVisibleParams {
+                            visible_size,
+                            radius: layer_params.radius,
+                        }],
                         layer_params.learning_radius,
                         layer_params.encoder_lr,
                         layer_params.choice,
@@ -125,10 +127,10 @@ impl<'a> Sph {
         let mut current_input = input;
 
         for layer in &mut self.layers {
-            let (hidden, enc_data) = layer.encoder.forward(current_input);
+            let (hidden, enc_data) = layer.encoder.forward(&[current_input]);
 
             if learn {
-                layer.encoder.learn(current_input, &hidden, &enc_data);
+                layer.encoder.learn(&[current_input], &hidden, &enc_data);
             }
 
             layer.state.hidden_state = hidden.into();
@@ -151,9 +153,7 @@ impl<'a> Sph {
 
             let hidden_slice = &layer.state.hidden_state[..];
             let decoder_input = match &feedback {
-                Some(fb) => {
-                    &[hidden_slice, fb][..]
-                }
+                Some(fb) => &[hidden_slice, fb][..],
                 None => &[hidden_slice][..],
             };
 
