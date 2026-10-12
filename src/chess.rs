@@ -39,7 +39,7 @@ struct ChessModelSnapshot<'a> {
     body: SphSnapshot<'a>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct BottomLayerParams {
     pub encoder_lr: f32,
     pub radius: i16,
@@ -153,11 +153,11 @@ impl<'a> ChessModel {
         }
     }
 
-    pub fn get_commited_rates(&self) -> (f32, Vec<f32>) {
-        (
-            self.bottom_encoder.get_commited_rate(),
-            self.body.get_committed_rates(),
-        )
+    pub fn get_commited_rates(&self) -> Vec<f32> {
+        let mut rates = self.body.get_committed_rates();
+        rates.insert(0, self.bottom_encoder.get_commited_rate());
+
+        rates
     }
 
     fn get_snapshot(&'a self) -> ChessModelSnapshot<'a> {

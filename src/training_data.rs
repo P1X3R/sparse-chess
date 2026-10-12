@@ -1,4 +1,8 @@
-use std::{fs::File, io::Read, path::Path};
+use std::{
+    fs::File,
+    io::Read,
+    path::{Path, PathBuf},
+};
 
 use crate::{
     chess::{ChessModel, PosAuxiliarDim},
@@ -84,10 +88,21 @@ impl TrainingData {
             1 // Draw
         }
     }
+
+    #[inline]
+    pub fn get_policy_target(&self) -> [f32; 1858] {
+        self.probabilities.map(|p| p.max(0.0))
+    }
+
+    #[inline]
+    pub fn get_legality_mask(&self) -> [bool; 1858] {
+        self.probabilities.map(|p| p >= 0.0)
+    }
 }
 
 const _: () = assert!(TrainingData::BYTES == 8356);
 
+#[inline]
 pub fn load_records_from_bytes(bytes: &[u8]) -> &[TrainingData] {
     let (records, _remainder) =
         <[TrainingData]>::ref_from_prefix(bytes).expect("Byte stream alignment or size issue");
@@ -95,6 +110,7 @@ pub fn load_records_from_bytes(bytes: &[u8]) -> &[TrainingData] {
     records
 }
 
+#[inline]
 pub fn read_chunk_file<P: AsRef<Path>>(path: P) -> std::io::Result<Vec<u8>> {
     let file = File::open(path)?;
     let mut buffer = Vec::new();
@@ -105,11 +121,17 @@ pub fn read_chunk_file<P: AsRef<Path>>(path: P) -> std::io::Result<Vec<u8>> {
     Ok(buffer)
 }
 
-pub fn lc0_to_csdr(data: &TrainingData, out: &mut [&mut [u16]; 2]) {
-    let (left, right) = out.split_at_mut(1);
-    let planes = &mut left[0];
-    let aux = &mut right[0];
+#[inline]
+pub fn read_dataset_dir(path: &str) -> Vec<PathBuf> {
+    std::fs::read_dir(path)
+        .expect("failed to read dataset dir")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("gz"))
+        .collect()
+}
 
+pub fn lc0_to_csdr(data: &TrainingData, planes: &mut [u16], aux: &mut [u16]) {
     assert_eq!(planes.len(), ChessModel::PLANES_SIZE.cols);
     assert_eq!(aux.len(), ChessModel::AUXILIARY_SIZE.cols);
 

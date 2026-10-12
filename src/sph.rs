@@ -33,7 +33,7 @@ pub struct Sph {
     input_cols: usize,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize)]
 pub struct LayerParams {
     pub decoder_lr: f32,
     pub encoder_lr: f32,

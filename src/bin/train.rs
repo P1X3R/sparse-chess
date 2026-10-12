@@ -1,11 +1,14 @@
-use std::time::Instant;
+use std::path::PathBuf;
 
+use fastrand::Rng;
 use sparse_chess::{
     chess::{BottomLayerParams, ChessModel},
     coder::column_wise_one_hot,
     sph::LayerParams,
-    training_data::{lc0_to_csdr, load_records_from_bytes, read_chunk_file},
+    training_data::{lc0_to_csdr, load_records_from_bytes, read_chunk_file, read_dataset_dir},
 };
+
+use mlflow_client::Mlflow;
 
 const BODY_LEN: usize = 2;
 
@@ -14,14 +17,14 @@ const BOTTOM_PARAMS: BottomLayerParams = BottomLayerParams {
     radius: 1,
     learning_radius: 1,
     choice: 1e-4,
-    vigilance: 0.5,
+    vigilance: 0.0833,
     active_ratio: 0.2,
     policy_lr: 0.08,
     policy_half_dendrites: 2,
     policy_scale: 1.0,
     value_lr: 0.08,
     value_half_dendrites: 6,
-    value_scale: 8.0,
+    value_scale: 1.0,
 };
 
 const PARAMS: [LayerParams; BODY_LEN] = [
@@ -31,7 +34,7 @@ const PARAMS: [LayerParams; BODY_LEN] = [
         radius: 1,
         learning_radius: 1,
         choice: 1e-4,
-        vigilance: 0.75,
+        vigilance: 0.866,
         active_ratio: 0.2,
         half_dendrites: 2,
         decoder_scale: 8.0,
@@ -59,15 +62,6 @@ const LAMBDA: f32 = 0.25;
 
 const MIN_LR: f32 = 0.001;
 const MAX_LR: f32 = 0.06;
-const TOTAL_GAMES: usize = 50000;
-
-struct ValSample {
-    planes: [u16; ChessModel::PLANES_SIZE.cols],
-    aux: [u16; ChessModel::AUXILIARY_SIZE.cols],
-    legality_mask: [bool; 1858],
-    policy_target: [f32; 1858],
-    value_target: [f32; 3],
-}
 
 #[inline]
 fn cosine_annealing(games: f32, total_games: f32, max_lr: f32, min_lr: f32) -> f32 {
@@ -94,89 +88,129 @@ fn std_dev_sum(x: &[f32], mean: f32) -> f32 {
         .sum::<f32>()
 }
 
-fn evaluate_validation(model: &mut ChessModel, samples: &[ValSample]) {
-    println!("---");
+fn evaluate_validation(
+    rng: &mut Rng,
+    run: &mut mlflow_client::MlflowRunWriter,
+    step: usize,
+    model: &mut ChessModel,
+    val_files: &[PathBuf],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let sample_files = rng.choose_multiple(val_files.iter(), VALIDATION_SAMPLES);
 
-    let (bottom_rate, body_rates) = model.get_commited_rates();
+    let commitment_rates = model.get_commited_rates();
 
-    println!(
-        "Committed rates (bottom layer -> body layers): {:.4} -> {:.4?}",
-        bottom_rate, body_rates
-    );
+    for (i, &rate) in commitment_rates.iter().enumerate() {
+        run.log_metric(
+            &format!("val/layer{}_commitment", i),
+            rate as f64,
+            Some(step as i64),
+        )?;
+    }
+
+    let mut num_steps = 0;
 
     let mut total_policy_cce = 0.0;
     let mut total_value_loss = 0.0;
     let mut std_dev = 0.0;
-    let mut target_std_dev = 0.0;
     let mut top_1_correct = 0;
-    let start = Instant::now();
 
-    for sample in samples {
-        let output = model.step(&[&sample.planes, &sample.aux], &sample.legality_mask, None);
+    let mut planes = [0u16; ChessModel::PLANES_SIZE.cols];
+    let mut aux = [0u16; ChessModel::AUXILIARY_SIZE.cols];
 
-        debug_assert!(
-            output
-                .policy
-                .iter()
-                .zip(sample.legality_mask)
-                .filter(|&(_, is_legal)| !is_legal)
-                .all(|(&p, _)| p == 0.0),
-            "found policy head output where an illegal move's probability is greater than zero"
-        );
+    for file in sample_files {
+        let bytes = read_chunk_file(&file).unwrap();
+        let game_buf = load_records_from_bytes(&bytes);
 
-        debug_assert!(
-            output
-                .policy
-                .iter()
-                .zip(sample.legality_mask)
-                .filter(|&(_, is_legal)| is_legal)
-                .all(|(&p, _)| p > 0.0),
-            "found policy head output where a legal move's probability is less than or equal to zero"
-        );
+        for pos in game_buf {
+            lc0_to_csdr(&pos, &mut planes, &mut aux);
 
-        let pred_best = column_wise_one_hot(&output.policy);
-        let best = column_wise_one_hot(&sample.policy_target);
+            let value_target = pos.get_blended_wdl(LAMBDA);
+            let policy_target = pos.get_policy_target();
+            let legality_mask = pos.get_legality_mask();
 
-        if pred_best == best {
-            top_1_correct += 1;
+            let output = model.step(&[&planes, &aux], &legality_mask, None);
+
+            debug_assert!(
+                output
+                    .policy
+                    .iter()
+                    .zip(legality_mask)
+                    .filter(|&(_, is_legal)| !is_legal)
+                    .all(|(&p, _)| p == 0.0),
+                "found policy head output where an illegal move's probability is greater than zero"
+            );
+
+            debug_assert!(
+                output
+                    .policy
+                    .iter()
+                    .zip(legality_mask)
+                    .filter(|&(_, is_legal)| is_legal)
+                    .all(|(&p, _)| p > 0.0),
+                "found policy head output where a legal move's probability is less than or equal to zero"
+            );
+
+            let pred_best = column_wise_one_hot(&output.policy);
+            let best = column_wise_one_hot(&policy_target);
+
+            if pred_best == best {
+                top_1_correct += 1;
+            }
+
+            total_value_loss += cross_entropy(&output.value, &value_target);
+            total_policy_cce += cross_entropy(&output.policy, &policy_target);
+
+            std_dev += std_dev_sum(&output.value, 1.0 / 3.0);
         }
 
-        total_value_loss += cross_entropy(&output.value, &sample.value_target);
-        total_policy_cce += cross_entropy(&output.policy, &sample.policy_target);
-
-        std_dev += std_dev_sum(&output.value, 1.0 / 3.0);
-        target_std_dev += std_dev_sum(&sample.value_target, 1.0 / 3.0);
+        num_steps += game_buf.len();
     }
 
-    let duration = Instant::now() - start;
-
-    if !samples.is_empty() {
-        let n = samples.len() as f32;
+    if num_steps > 0 {
+        let n = num_steps as f32;
         let policy_loss = total_policy_cce / n;
         let value_loss = total_value_loss / n;
+        let top1_acc = (top_1_correct as f32 / n) * 100.0;
+        let val_std_dev = (std_dev / n).sqrt();
 
         println!(
-            "Validation Set Loss | Policy CCE: {policy_loss:.4}, Value CCE: {value_loss:.4}, Top 1 accuracy: {:.2}%",
-            (top_1_correct as f32 / n) * 100.0
+            " -> [Val @ Step {:>8}] Policy CCE: {:.4} | Value CCE: {:.4} | Top-1 Acc: {:.2}%",
+            step, policy_loss, value_loss, top1_acc
         );
 
-        println!(
-            "Value Head Standard Deviation | Prediction: {:.4}, Target: {:.4}",
-            (std_dev / n).sqrt(),
-            (target_std_dev / n).sqrt()
-        );
-
-        println!("Throughput: {:.2?}/pos", duration.div_f32(n));
+        run.log_metric("val/value_cce", value_loss as f64, Some(step as i64))?;
+        run.log_metric("val/policy_cce", policy_loss as f64, Some(step as i64))?;
+        run.log_metric("val/top_1_accuracy", top1_acc as f64, Some(step as i64))?;
+        run.log_metric("val/value_std_dev", val_std_dev as f64, Some(step as i64))?;
     }
 
-    println!("---");
+    Ok(())
 }
 
-fn main() -> std::io::Result<()> {
-    fastrand::seed(6457827717110365317);
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    fastrand::seed(123);
+    let mut dataset_rng = fastrand::Rng::with_seed(1234);
 
-    let dir_path = "training-run1-test80-20240401-0017";
+    let train_dataset_path = "training-dataset/train";
+    let val_dataset_path = "training-dataset/val";
     let model_path = "model.bin";
+
+    let train_files = read_dataset_dir(train_dataset_path);
+    let val_files = read_dataset_dir(val_dataset_path);
+    let total_games = train_files.len();
+
+    let mlflow = Mlflow::new("http://localhost:5000")?;
+    let experiment = mlflow.create_experiment_if_not_exists("sparse-chess", Default::default())?;
+    let mut run = experiment.start_run("sph")?;
+
+    run.log_params("bottom_params", BOTTOM_PARAMS)?;
+    for (i, layer) in PARAMS.iter().enumerate() {
+        run.log_params(&format!("body_params/layer_{i}"), layer)?;
+    }
+    run.log_params("total_games", total_games)?;
+    run.log_params("max_lr", MAX_LR)?;
+    run.log_params("min_lr", MIN_LR)?;
+    run.log_params("lambda", LAMBDA)?;
 
     let mut model = match ChessModel::load_from_file(model_path) {
         Ok(model) => {
@@ -189,48 +223,10 @@ fn main() -> std::io::Result<()> {
         }
     };
 
-    let mut gz_files: Vec<_> = std::fs::read_dir(dir_path)?
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .filter(|path| path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("gz"))
-        .collect();
-
-    fastrand::shuffle(&mut gz_files);
-
     let mut planes = [0u16; ChessModel::PLANES_SIZE.cols];
     let mut aux = [0u16; ChessModel::AUXILIARY_SIZE.cols];
 
-    // 10% split ratio
-    let val_split_idx = ((gz_files.len() as f32) * 0.1).round() as usize;
-    let (total_val_files, train_files) = gz_files.split_at(val_split_idx.max(1));
-    let val_files = fastrand::choose_multiple(total_val_files.iter(), VALIDATION_SAMPLES);
-
-    println!("Buffering validation set into RAM...");
-    let mut val_buffer: Vec<ValSample> = Vec::new();
-
-    for val_path in val_files {
-        let bytes = read_chunk_file(val_path)?;
-        let game = load_records_from_bytes(&bytes);
-
-        for pos in game {
-            let mut planes = [0u16; ChessModel::PLANES_SIZE.cols];
-            let mut aux = [0u16; ChessModel::AUXILIARY_SIZE.cols];
-            let mut encoded = [&mut planes[..], &mut aux[..]];
-
-            lc0_to_csdr(&pos, &mut encoded);
-
-            val_buffer.push(ValSample {
-                planes,
-                aux,
-                legality_mask: pos.probabilities.map(|p| p >= 0.0),
-                policy_target: pos.probabilities.map(|p| p.max(0.0)),
-                value_target: pos.get_blended_wdl(LAMBDA),
-            });
-        }
-    }
-    println!("Loaded {} validation samples into RAM.", val_buffer.len());
-
-    evaluate_validation(&mut model, &val_buffer);
+    evaluate_validation(&mut dataset_rng, &mut run, 0, &mut model, &val_files)?;
 
     let mut window_policy_ce = 0.0;
     let mut total_policy_ce = 0.0;
@@ -239,25 +235,20 @@ fn main() -> std::io::Result<()> {
     let mut window_train_pos = 0;
     let mut total_train_pos = 0;
 
-    for (count, chunk_path) in train_files.iter().enumerate() {
-        if count >= TOTAL_GAMES {
-            evaluate_validation(&mut model, &val_buffer);
-            break;
-        }
+    for (game_idx, file) in train_files.iter().enumerate() {
+        let bytes = read_chunk_file(file).unwrap();
+        let game_buf = load_records_from_bytes(&bytes);
 
-        let new_lr = cosine_annealing(count as f32, TOTAL_GAMES as f32, MAX_LR, MIN_LR);
+        let new_lr = cosine_annealing(game_idx as f32, total_games as f32, MAX_LR, MIN_LR);
         model.policy_head.lr = new_lr;
         model.value_head.lr = new_lr;
 
-        let bytes = read_chunk_file(&chunk_path)?;
-        let game = load_records_from_bytes(&bytes).to_vec();
+        for pos in game_buf {
+            lc0_to_csdr(pos, &mut planes, &mut aux);
 
-        for training_pos in &game {
-            lc0_to_csdr(training_pos, &mut [&mut planes[..], &mut aux[..]]);
-
-            let policy_target = training_pos.probabilities.map(|p| p.max(0.0));
-            let legality_mask = training_pos.probabilities.map(|p| p >= 0.0);
-            let value_target = training_pos.get_blended_wdl(LAMBDA);
+            let policy_target = pos.get_policy_target();
+            let legality_mask = pos.get_legality_mask();
+            let value_target = pos.get_blended_wdl(LAMBDA);
 
             let output = model.step(
                 &[&planes, &aux],
@@ -279,19 +270,45 @@ fn main() -> std::io::Result<()> {
 
         model.body.clean_learning_state();
 
-        if total_train_pos > 0 && count > 0 && count % LOG_EVERY == 0 {
+        if total_train_pos > 0 && game_idx > 0 && game_idx % LOG_EVERY == 0 {
             let total_pos = total_train_pos as f32;
             let window_pos = window_train_pos as f32;
 
+            let cumulative_val_loss = total_value_ce / total_pos;
+            let window_val_loss = window_value_ce / window_pos;
+            let cumulative_pol_loss = total_policy_ce / total_pos;
+            let window_pol_loss = window_policy_ce / window_pos;
+
             println!(
-                "Train Set ({count} games) | Val CE: {:.4} (Win: {:.4}) | Pol CE: {:.4} (Win: {:.4}) | Value LR: {:.4} | Policy LR: {:.4}",
-                total_value_ce / total_pos,
-                window_value_ce / window_pos,
-                total_policy_ce / total_pos,
-                window_policy_ce / window_pos,
-                model.value_head.lr,
-                model.policy_head.lr,
+                "[Train] Game {:>6}/{} | Pos: {:>8} | Val Loss: {:.4} | Pol Loss: {:.4} | LR: {:.6}",
+                game_idx, total_games, total_train_pos, window_val_loss, window_pol_loss, new_lr
             );
+
+            run.log_metric(
+                "train/window_value_cce",
+                window_val_loss as f64,
+                Some(total_train_pos as i64),
+            )?;
+            run.log_metric(
+                "train/window_policy_cce",
+                window_pol_loss as f64,
+                Some(total_train_pos as i64),
+            )?;
+            run.log_metric(
+                "train/total_value_cce",
+                cumulative_val_loss as f64,
+                Some(total_train_pos as i64),
+            )?;
+            run.log_metric(
+                "train/total_policy_cce",
+                cumulative_pol_loss as f64,
+                Some(total_train_pos as i64),
+            )?;
+            run.log_metric(
+                "train/heads_lr",
+                new_lr as f64,
+                Some(total_train_pos as i64),
+            )?;
 
             window_value_ce = 0.0;
             window_policy_ce = 0.0;
@@ -300,11 +317,19 @@ fn main() -> std::io::Result<()> {
             model.save_to_file(model_path)?;
         }
 
-        if count > 0 && count % VALIDATE_EVERY == 0 {
-            evaluate_validation(&mut model, &val_buffer);
+        if game_idx > 0 && game_idx % VALIDATE_EVERY == 0 {
+            evaluate_validation(
+                &mut dataset_rng,
+                &mut run,
+                total_train_pos,
+                &mut model,
+                &val_files,
+            )?;
         }
     }
 
     model.save_to_file(model_path)?;
+
+    run.finish()?;
     Ok(())
 }
