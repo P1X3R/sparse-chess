@@ -61,13 +61,17 @@ The input consists of two layers:
 1. **Board layer (8×8×13):** Contains the piece placement on the board.
 2. **Auxiliary layer (1×6×16):** Contains additional positional information, including castling rights, side to move, and the halfmove clock.
 
-#### Hyperparameters
+### Hyperparameters
 
 - **Number of layers:** 3
 - **Hidden representation dimensions (per layer):** 8×8×128
 - **Local receptive field size:** 3×3 (i.e., `r = 1`)
 
 See the beginning of `src/bin/train.rs` for the training and model hyperparameters.
+
+### Model Size
+
+- **Parameter count:** 336,150,528
 
 ## Training Methodology
 
