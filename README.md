@@ -162,7 +162,13 @@ To replicate the experiment, first download one of the chunks from the [Lc0 Trai
 
 ### How to Split the Dataset
 
-Split the `.gz` files into `dataset/val/` and `dataset/train/`. Since the paths are hardcoded, you must update them manually in `src/bin/train.rs`.
+Just split the `.gz` files into `training-dataset/val/` and `training-dataset/train`. Since the paths are hardcoded into the code, you have to change the paths manually in the `src/bin/train.rs` file.
+
+You can split the dataset automatically with the following script:
+
+```bash
+bash split_dataset.sh
+```
 
 ### How to Set Up the MLflow Server
 
