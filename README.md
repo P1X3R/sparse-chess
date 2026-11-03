@@ -63,23 +63,39 @@ The input consists of two layers:
 
 ### Hyperparameters
 
-- **Number of layers:** 3
-- **Hidden representation dimensions (per layer):** 8×8×128
-- **Local receptive field size:** 3×3 (i.e., `r = 1`)
+* **Number of layers:** 3 (1 bottom layer + 2 body layers)
+* **Pipeline / Grid Dimensions (`PIPELINE_SIZES`):** `(8, 8, 32)` across all 3 layers
+* **Local Receptive Field Size (`radius`):**
+    * **Bottom layer:** 1x1 (`radius = 0`)
+    * **Body layers:** 3×3 (`radius = 1`)
 
-See the beginning of `src/bin/train.rs` for the training and model hyperparameters.
+* **Vigilance:** (tuned in `src/bin/tune_hyperparams.rs`)
+    * **Bottom layer:** `0.8703`
+    * **Body layers:** `0.8`
+
+* **Learning Rates:**
+    * **Bottom layer:** Encoder LR = `0.2`, Policy LR = `0.02`, Value LR = `0.02`
+    * **Body layers (Layer 0 / Layer 1):** Encoder LR = `0.1`, Decoder LR = `0.02` / `0.01`
+
+* **Other Training & Validation Constants:**
+    * **Choice parameter:** `1e-4`
+    * **Active ratio:** `1.0` (tuned in `src/bin/tune_hyperparams.rs`)
+    * **Lambda:** `0.25` (meaning that the value head target WDL is a blend 25% MCTS q-value 75% game outcome)
+    * **Validation samples:** `200` (only use a small random part of the dataset at a time for validation)
+    * **Validation frequency:** Every `1000` steps (`VALIDATE_EVERY`)
+    * **Logging frequency:** Every `100` steps (`LOG_EVERY`)
+
+See `src/hyperparams.rs` for the complete list of hyperparameters and settings.
 
 ### Model Size
 
-- **Parameter count:** 336,150,528
+- **Parameter count:** 44,896,256
 
 ## Training Methodology
 
 Although SPHs thrive in online-learning contexts, the primary goal was to measure their raw playing-strength potential. To save computation time, the model was trained using supervised learning on chunks of the Lc0 `test80` dataset: 10K games for training and 2K games for validation. Each validation pass sampled 200 games from the validation set.
 
 The same training dataset and methodology were used for the control group.
-
-> **Note:** Just for fun, I added cosine annealing to the SPH's head learning rate. However, this feature yielded no significant gains.
 
 ## Control Group
 
@@ -162,24 +178,16 @@ To replicate the experiment, first download one of the chunks from the [Lc0 Trai
 
 ### How to Split the Dataset
 
-Just split the `.gz` files into `training-dataset/val/` and `training-dataset/train`. Since the paths are hardcoded into the code, you have to change the paths manually in the `src/bin/train.rs` file.
-
-You can split the dataset automatically with the following script:
+Just split the `.gz` files into different directories. You can automatically download and split the dataset with the following script:
 
 ```bash
 bash split_dataset.sh
 ```
 
-### How to Set Up the MLflow Server
-
-```bash
-mlflow server --host 0.0.0.0 --port 5000
-```
-
-> **Note:** The MLflow server address is hardcoded in `src/bin/train.rs`, so you must either modify it or run the server at `http://localhost:5000`. A configuration file is planned for the future to save you a headache. ;)
+It will create a `training-dataset` directory with `training-dataset/train` and `training-dataset/val` containing the `.gz` chunks. You can change the script config directly in its source, at the very beginning in the *Configuration* section.
 
 ### How to Run
 
 ```bash
-cargo run --release --bin train
+cargo run --release --bin train -- <train dataset path> <val dataset path> <model path> <mlflow uri>
 ```
