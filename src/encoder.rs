@@ -34,7 +34,7 @@ pub struct EncoderSnapshot<'a> {
     learning_radius: isize,
 
     #[serde(borrow)]
-    hidden_totals: Cow<'a, [u16]>,
+    hidden_totals: Cow<'a, [u32]>,
 
     #[serde(borrow)]
     is_committed: Cow<'a, [bool]>,
@@ -158,7 +158,7 @@ impl EncoderVisibleLayer {
         hidden_z: usize,
         is_committed: bool,
         weight_deltas: &[u8; 256],
-        hidden_total: &mut u16,
+        hidden_total: &mut u32,
     ) {
         let local_field = self.receptive_field.get_col(hidden_col);
 
@@ -173,12 +173,12 @@ impl EncoderVisibleLayer {
             let new = if is_committed {
                 weight_deltas[old as usize]
             } else {
-                255 - old
+                255
             };
 
             self.weights[weights_idx] = new;
 
-            *hidden_total += (new - old) as u16;
+            *hidden_total += (new - old) as u32;
         }
     }
 
@@ -229,7 +229,7 @@ pub struct Encoder {
     counts_all: Box<[u16]>,
     counts_except: Box<[u16]>,
 
-    hidden_totals: Box<[u16]>,
+    hidden_totals: Box<[u32]>,
     is_committed: Box<[bool]>,
 
     choice: f32,
@@ -522,16 +522,6 @@ impl Encoder {
             .filter(|&&committed| committed)
             .count() as f32
             / self.is_committed.len() as f32
-    }
-
-    pub fn get_saturated_rate(&self) -> f32 {
-        self.visible_layers
-            .iter()
-            .map(|l| {
-                l.weights.iter().filter(|w| **w == 255).count() as f32 / l.weights.len() as f32
-            })
-            .sum::<f32>()
-            / self.visible_layers.len() as f32
     }
 
     pub fn get_snapshot(&self) -> EncoderSnapshot<'_> {
