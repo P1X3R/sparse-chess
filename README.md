@@ -191,3 +191,7 @@ It will create a `training-dataset` directory with `training-dataset/train` and 
 ```bash
 cargo run --release --bin train -- <train dataset path> <val dataset path> <model path> <mlflow uri>
 ```
+
+## Journal / Engineering log
+
+See [Full Development Journal](JOURNAL.md)
