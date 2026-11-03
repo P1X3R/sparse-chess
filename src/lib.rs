@@ -5,3 +5,4 @@ pub mod encoder;
 pub mod ffi;
 pub mod sph;
 pub mod training_data;
+pub mod hyperparams;

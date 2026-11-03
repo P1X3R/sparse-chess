@@ -2,72 +2,13 @@ use std::path::PathBuf;
 
 use fastrand::Rng;
 use sparse_chess::{
-    chess::{BottomLayerParams, ChessModel},
+    hyperparams,
+    chess::ChessModel,
     coder::column_wise_one_hot,
-    sph::LayerParams,
     training_data::{lc0_to_csdr, load_records_from_bytes, read_chunk_file, read_dataset_dir},
 };
 
 use mlflow_client::Mlflow;
-
-const BODY_LEN: usize = 2;
-
-const BOTTOM_PARAMS: BottomLayerParams = BottomLayerParams {
-    encoder_lr: 0.2,
-    radius: 1,
-    learning_radius: 1,
-    choice: 1e-4,
-    vigilance: 0.0833,
-    active_ratio: 0.2,
-    policy_lr: 0.08,
-    policy_half_dendrites: 2,
-    policy_scale: 1.0,
-    value_lr: 0.08,
-    value_half_dendrites: 6,
-    value_scale: 1.0,
-};
-
-const PARAMS: [LayerParams; BODY_LEN] = [
-    LayerParams {
-        decoder_lr: 0.02,
-        encoder_lr: 0.1,
-        radius: 1,
-        learning_radius: 1,
-        choice: 1e-4,
-        vigilance: 0.866,
-        active_ratio: 0.2,
-        half_dendrites: 2,
-        decoder_scale: 8.0,
-    },
-    LayerParams {
-        decoder_lr: 0.02,
-        encoder_lr: 0.1,
-        radius: 1,
-        learning_radius: 1,
-        choice: 1e-4,
-        vigilance: 0.9,
-        active_ratio: 0.1,
-        half_dendrites: 3,
-        decoder_scale: 8.0,
-    },
-];
-
-const PIPELINE_SIZES: [(usize, usize, usize); BODY_LEN + 1] =
-    [(8, 8, 128), (8, 8, 128), (8, 8, 128)];
-
-const VALIDATION_SAMPLES: usize = 200;
-const VALIDATE_EVERY: usize = 1000;
-const LOG_EVERY: usize = 100;
-const LAMBDA: f32 = 0.25;
-
-const MIN_LR: f32 = 0.001;
-const MAX_LR: f32 = 0.06;
-
-#[inline]
-fn cosine_annealing(games: f32, total_games: f32, max_lr: f32, min_lr: f32) -> f32 {
-    let progress = (std::f32::consts::PI * games / total_games).cos();
-    min_lr + 0.5 * (max_lr - min_lr) * (1.0 + progress)
-}
 
 #[inline]
 fn cross_entropy(pred: &[f32], target: &[f32]) -> f32 {
@@ -95,7 +36,7 @@ fn evaluate_validation(
     model: &mut ChessModel,
     val_files: &[PathBuf],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let sample_files = rng.choose_multiple(val_files.iter(), VALIDATION_SAMPLES);
+    let sample_files = rng.choose_multiple(val_files.iter(), hyperparams::VALIDATION_SAMPLES);
 
     let commitment_rates = model.get_commited_rates();
 
@@ -124,7 +65,7 @@ fn evaluate_validation(
         for pos in game_buf {
             lc0_to_csdr(&pos, &mut planes, &mut aux);
 
-            let value_target = pos.get_blended_wdl(LAMBDA);
+            let value_target = pos.get_blended_wdl(hyperparams::LAMBDA);
             let policy_target = pos.get_policy_target();
             let legality_mask = pos.get_legality_mask();
 
@@ -191,26 +132,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fastrand::seed(123);
     let mut dataset_rng = fastrand::Rng::with_seed(1234);
 
-    let train_dataset_path = "training-dataset/train";
-    let val_dataset_path = "training-dataset/val";
-    let model_path = "model.bin";
+    let args: Vec<String> = std::env::args().collect();
 
-    let train_files = read_dataset_dir(train_dataset_path);
-    let val_files = read_dataset_dir(val_dataset_path);
-    let total_games = train_files.len();
-
-    let mlflow = Mlflow::new("http://localhost:5000")?;
-    let experiment = mlflow.create_experiment_if_not_exists("sparse-chess", Default::default())?;
-    let mut run = experiment.start_run("sph")?;
-
-    run.log_params("bottom_params", BOTTOM_PARAMS)?;
-    for (i, layer) in PARAMS.iter().enumerate() {
-        run.log_params(&format!("body_params/layer_{i}"), layer)?;
+    if args.len() != 5 {
+        panic!(
+            "usage: {} <train dataset path> <val dataset path> <model path> <mlflow uri>",
+            args[0]
+        );
     }
-    run.log_params("total_games", total_games)?;
-    run.log_params("max_lr", MAX_LR)?;
-    run.log_params("min_lr", MIN_LR)?;
-    run.log_params("lambda", LAMBDA)?;
+
+    let train_dataset_path = &args[1];
+    let val_dataset_path = &args[2];
+    let model_path = &args[3];
+    let mlflow_uri = &args[4];
 
     let mut model = match ChessModel::load_from_file(model_path) {
         Ok(model) => {
@@ -219,9 +153,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Err(err) => {
             println!("error loading model file: {}, initializing new model", err);
-            ChessModel::new(&PIPELINE_SIZES, &PARAMS, &BOTTOM_PARAMS)
+            ChessModel::new(
+                &hyperparams::PIPELINE_SIZES,
+                &hyperparams::PARAMS,
+                &hyperparams::BOTTOM_PARAMS,
+            )
         }
     };
+
+    println!("parameter count: {}", model.get_parameter_count());
+
+    let train_files = read_dataset_dir(train_dataset_path);
+    let val_files = read_dataset_dir(val_dataset_path);
+    let total_games = train_files.len();
+
+    let mlflow = Mlflow::new(mlflow_uri)?;
+    let experiment = mlflow.create_experiment_if_not_exists("sparse-chess", Default::default())?;
+    let mut run = experiment.start_run("sph 1")?;
+
+    run.log_params("bottom_params", hyperparams::BOTTOM_PARAMS)?;
+    for (i, layer) in hyperparams::PARAMS.iter().enumerate() {
+        run.log_params(&format!("body_params/layer_{i}"), layer)?;
+    }
+    run.log_params("total_games", total_games)?;
+    run.log_params("lambda", hyperparams::LAMBDA)?;
 
     let mut planes = [0u16; ChessModel::PLANES_SIZE.cols];
     let mut aux = [0u16; ChessModel::AUXILIARY_SIZE.cols];
@@ -239,16 +194,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let bytes = read_chunk_file(file).unwrap();
         let game_buf = load_records_from_bytes(&bytes);
 
-        let new_lr = cosine_annealing(game_idx as f32, total_games as f32, MAX_LR, MIN_LR);
-        model.policy_head.lr = new_lr;
-        model.value_head.lr = new_lr;
-
         for pos in game_buf {
             lc0_to_csdr(pos, &mut planes, &mut aux);
 
             let policy_target = pos.get_policy_target();
             let legality_mask = pos.get_legality_mask();
-            let value_target = pos.get_blended_wdl(LAMBDA);
+            let value_target = pos.get_blended_wdl(hyperparams::LAMBDA);
 
             let output = model.step(
                 &[&planes, &aux],
@@ -270,7 +221,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         model.body.clean_learning_state();
 
-        if total_train_pos > 0 && game_idx > 0 && game_idx % LOG_EVERY == 0 {
+        if total_train_pos > 0 && game_idx > 0 && game_idx % hyperparams::LOG_EVERY == 0 {
             let total_pos = total_train_pos as f32;
             let window_pos = window_train_pos as f32;
 
@@ -280,8 +231,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let window_pol_loss = window_policy_ce / window_pos;
 
             println!(
-                "[Train] Game {:>6}/{} | Pos: {:>8} | Val Loss: {:.4} | Pol Loss: {:.4} | LR: {:.6}",
-                game_idx, total_games, total_train_pos, window_val_loss, window_pol_loss, new_lr
+                "[Train] Game {:>6}/{} | Pos: {:>8} | Val Loss: {:.4} | Pol Loss: {:.4}",
+                game_idx, total_games, total_train_pos, window_val_loss, window_pol_loss
             );
 
             run.log_metric(
@@ -304,11 +255,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 cumulative_pol_loss as f64,
                 Some(total_train_pos as i64),
             )?;
-            run.log_metric(
-                "train/heads_lr",
-                new_lr as f64,
-                Some(total_train_pos as i64),
-            )?;
 
             window_value_ce = 0.0;
             window_policy_ce = 0.0;
@@ -317,7 +263,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             model.save_to_file(model_path)?;
         }
 
-        if game_idx > 0 && game_idx % VALIDATE_EVERY == 0 {
+        if game_idx > 0 && game_idx % hyperparams::VALIDATE_EVERY == 0 {
             evaluate_validation(
                 &mut dataset_rng,
                 &mut run,
