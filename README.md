@@ -195,3 +195,7 @@ cargo run --release --bin train -- <train dataset path> <val dataset path> <mode
 ## Journal / Engineering log
 
 See [Full Development Journal](JOURNAL.md)
+
+## License
+
+MIT License. See [LICENSE](LICENSE) for more details.
