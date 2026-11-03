@@ -80,7 +80,7 @@ The input consists of two layers:
 * **Other Training & Validation Constants:**
     * **Choice parameter:** `1e-4`
     * **Active ratio:** `1.0` (tuned in `src/bin/tune_hyperparams.rs`)
-    * **Lambda:** `0.25` (meaning that the value head target WDL is a blend 25% MCTS q-value 75% game outcome)
+    * **Lambda:** `0.25` (meaning that the value head target WDL is a blend 25% game outcome 75% MCTS q-value)
     * **Validation samples:** `200` (only use a small random part of the dataset at a time for validation)
     * **Validation frequency:** Every `1000` steps (`VALIDATE_EVERY`)
     * **Logging frequency:** Every `100` steps (`LOG_EVERY`)
