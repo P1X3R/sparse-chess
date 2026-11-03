@@ -214,4 +214,12 @@ impl<'a> Sph {
             input_cols: snapshot.input_cols,
         }
     }
+
+    #[inline]
+    pub fn get_parameter_count(&self) -> usize {
+        self.layers
+            .iter()
+            .map(|l| l.decoder.get_params_count() + l.encoder.get_params_count())
+            .sum()
+    }
 }

@@ -420,6 +420,11 @@ impl<'a> Decoder {
             scale: snapshot.scale,
         })
     }
+
+    #[inline]
+    pub fn get_params_count(&self) -> usize {
+        self.weights.len()
+    }
 }
 
 #[derive(Debug)]
@@ -718,5 +723,10 @@ impl<'a> Head {
             weights: snapshot.weights.into_owned().into_boxed_slice(),
             scale: snapshot.scale,
         }
+    }
+
+    #[inline]
+    pub fn get_params_count(&self) -> usize {
+        self.weights.len()
     }
 }

@@ -597,4 +597,9 @@ impl Encoder {
             lr: snapshot.lr,
         }
     }
+
+    #[inline]
+    pub fn get_params_count(&self) -> usize {
+        self.visible_layers.iter().map(|vl| vl.weights.len()).sum()
+    }
 }

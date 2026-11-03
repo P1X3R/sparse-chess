@@ -194,4 +194,11 @@ impl<'a> ChessModel {
 
         Ok(ChessModel::from_snapshot(snapshot))
     }
+
+    pub fn get_parameter_count(&self) -> usize {
+        self.body.get_parameter_count()
+            + self.bottom_encoder.get_params_count()
+            + self.value_head.get_params_count()
+            + self.policy_head.get_params_count()
+    }
 }
