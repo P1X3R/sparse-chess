@@ -93,7 +93,7 @@ See `src/hyperparams.rs` for the complete list of hyperparameters and settings.
 
 ## Training Methodology
 
-Although SPHs thrive in online-learning contexts, the primary goal was to measure their raw playing-strength potential. To save computation time, the model was trained using supervised learning on chunks of the Lc0 `test80` dataset: 10K games for training and 2K games for validation. Each validation pass sampled 200 games from the validation set.
+Although SPHs thrive in online-learning contexts, the primary goal was to measure their predictive performance in chess. To save computation time, the model was trained using supervised learning on chunks of the Lc0 `test80` dataset: 10K games for training and 2K games for validation. Each validation pass sampled 200 games from the validation set.
 
 The same training dataset and methodology were used for the control group.
 
@@ -167,7 +167,7 @@ See the [**Sparse Chess Control Group Script**](https://github.com/P1X3R/sparse-
 
 ## Conclusion
 
-Unfortunately, the results suggest that the hypothesis was incorrect. This type of model underperforms compared with architectures such as ResNets, Transformers and even plain CNNs in terms of raw chess-playing strength. There are two possible explanations:
+Unfortunately, the results suggest that the hypothesis was incorrect. This type of model underperforms compared with architectures such as ResNets, Transformers and even plain CNNs in terms of prediction accuracy. There are two possible explanations:
 
 1. **Limitations of local learning rules.** Local learning rules may be less effective for feature extraction than backpropagation, which optimizes parameters directly against a shared objective: minimizing the loss on the dataset. Local learning rules instead optimize parameters according to other criteria, such as topological similarity in Fuzzy ART. This limitation might be mitigated in the encoders by using Gaussian ARTMAP.
 2. **Information loss due to strict top-1 WTA and CSDR.** This is a trade-off made in favor of speed, preserving approximately 99% sparsity. However, experimenting with top-4 CSDR representations could be worthwhile. This would reduce sparsity to approximately 96%, preserving 4 times more information with just a 4% sparsity reduction, although this estimate is rough.
